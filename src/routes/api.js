@@ -80,7 +80,7 @@ function categoryBody(b) {
 
 /* ---------- router ---------- */
 
-function apiRouter({ pool, config, certificates }) {
+function apiRouter({ pool, config, certificates, tickets }) {
   const router = express.Router();
   const run = (sql, params) => queryResult(pool, sql, params);
   const handle = (fn) => (req, res, next) => {
@@ -200,6 +200,15 @@ function apiRouter({ pool, config, certificates }) {
       console.error('[certificates] sync failed:', err.message);
       throw new HttpError(502, `Could not read the keystore from CPI: ${err.message}`);
     }
+  }));
+
+  // Ticket pulse: Freshservice tickets from the table the n8n workflow "FreshServices Tickets" fills.
+  router.get('/tickets/pulse', handle((req) => tickets.pulse(range(req.query, config))));
+
+  router.get('/tickets/:id', handle(async (req) => {
+    const t = await tickets.ticket(text(req.params.id, 'id', 100, { required: true }));
+    if (!t) throw new HttpError(404, 'Ticket not found');
+    return t;
   }));
 
   // Step-by-step CPI connection test (settings, OAuth token, keystore, message logs). Never returns secrets.

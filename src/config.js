@@ -112,6 +112,14 @@ function loadConfig(env = process.env) {
       // The page warns when the last sync (by n8n or the app) is older than this.
       staleHours: Math.max(1, int(env.CERT_STALE_HOURS, 26)),
     },
+    tickets: {
+      // Freshservice tickets table filled by the n8n workflow "FreshServices Tickets" (Ticket pulse menu).
+      table: env.TICKETS_TABLE || 'tickets',
+      // Link to a ticket; {number} = digits of the ticket id (INC-123 -> 123), {id} = the whole id.
+      linkTemplate: env.TICKET_URL || '',
+      dueSoonHours: Math.max(1, int(env.TICKETS_DUE_SOON_HOURS, 72)),
+      staleHours: Math.max(1, int(env.TICKETS_STALE_HOURS, 24)),
+    },
     poller: {
       enabled: bool(env.CPI_POLL_ENABLED, false),
       ...cpiConnection(env),
@@ -132,6 +140,12 @@ function validateConfig(config) {
   if (!config.db.url) problems.push('DATABASE_URL is not set.');
   if (!config.auth.disabled && config.auth.users.length === 0) {
     problems.push('APP_USERS is empty. Set APP_USERS=user:password (or AUTH_DISABLED=true for local development only).');
+  }
+  if (!/^[A-Za-z_][A-Za-z0-9_]*([.][A-Za-z_][A-Za-z0-9_]*)?$/.test(config.tickets.table)) {
+    problems.push('TICKETS_TABLE must be a table name such as tickets or public.tickets.');
+  }
+  if (config.tickets.linkTemplate && !/^https?:[/][/]/i.test(config.tickets.linkTemplate)) {
+    problems.push('TICKET_URL must start with http:// or https://.');
   }
   const missing = missingCpiVars(config);
   if (missing.length > 0 && missing.length < 4) {

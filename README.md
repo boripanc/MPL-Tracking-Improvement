@@ -16,6 +16,7 @@ existing `errorscenario` view, so the app and the view always agree.
 | **Errors** | Filter by iFlow, status, category, analysis status and free text; page through results; export CSV. Clicking an error shows the full error text, category, root cause and solution, custom header properties, other messages with the same correlation ID, and a link to the CPI monitor. |
 | **Known errors & solutions** | Create / edit / delete entries in `error_analyzed`, set status (Open, In Progress, Monitoring, Resolved), add comments. A status change automatically adds a comment such as "Status changed from Open to Resolved by alice". |
 | **Categories** | Create / edit / delete rules in `error_category`, optionally limited to one iFlow, and see how many errors each rule catches. |
+| **Ticket pulse** | Health of the Freshservice ticket queue (from the table the n8n workflow fills): open backlog, overdue, due soon, unassigned, created vs. resolved per day, backlog by age, group, responder and status, and a filterable list of open tickets with their last comment. The menu shows a red badge with the number of overdue tickets. |
 | **Certificates** | Certificates and key pairs in the CPI tenant keystore (stored in the database by the n8n workflow) with their expiry date and days left: **Expired**, **Expires soon** (< 30 days), **Expiring** (< 90 days) or **Valid**. Filter by status or type, hide SAP-owned entries, search, open the full details (subject, issuer, serial, fingerprint) and export CSV. The menu shows a red badge with the number of expired and soon-expiring entries. |
 
 Both editors have a **Test against last 30 days** button that shows how many errors a pattern would match before you save it.
@@ -131,6 +132,26 @@ causes on company servers:
 | *Read keystore … HTTP 403* | The service key may not read the keystore; add the role to the service instance. |
 | *Got text/html instead of JSON* | `CPI_API_URL` points to the web UI instead of the tenant API (`…it-cpiNNN…/api/v1`). |
 
+## Ticket pulse
+
+The **Ticket pulse** menu shows how the Freshservice ticket queue is doing: open backlog, overdue, due soon and
+unassigned tickets, created vs. resolved per day in the selected period, the backlog by age, group, responder,
+status and pending reason, and a filterable list of all open tickets (click one for its description and last
+comment). The menu shows a red badge with the number of overdue tickets.
+
+It reads the `tickets` table that the **n8n workflow "FreshServices Tickets"** fills (one row per ticket, keyed by
+`human_display_id`). The app only reads it and does not create it. Open = any status except Resolved and Closed.
+Missing optional columns (such as `last_comment_*` or `tags`) are shown as empty; if the table is missing, the
+screen says so. The screen warns when the newest ticket change is older than `TICKETS_STALE_HOURS`, which usually
+means the workflow has not run or its Freshservice cookie expired.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `TICKETS_TABLE` | `tickets` | Table with the Freshservice tickets (`schema.table` is allowed). |
+| `TICKET_URL` | (none) | Link to a ticket, e.g. `https://itservice.thaiunion.com/a/tickets/{number}` (`{number}` = digits of `INC-123`, `{id}` = the whole id). |
+| `TICKETS_DUE_SOON_HOURS` | `72` | Open tickets due within this many hours count as **Due soon**. |
+| `TICKETS_STALE_HOURS` | `24` | Warn when the newest ticket change is older than this. |
+
 ## Optional: pull errors from CPI directly
 
 The app can replace the n8n workflow that copies CPI error MPLs into the database. It does the same thing:
@@ -194,6 +215,8 @@ All endpoints are under `/api`, require login and return JSON. Errors return `{ 
 | `POST /api/test-match` | `{ kind: "like" \| "regex", pattern, flow }` → matches in the last 30 days |
 | `GET /api/certificates` | Keystore entries from the database with `state` (expired / critical / warning / ok / unknown), `daysLeft`, a summary and the last sync. `?removed=1` includes removed entries |
 | `POST /api/certificates/sync` | Copy the keystore from CPI into the database now (only when this server has a CPI connection; otherwise 409) |
+| `GET /api/tickets/pulse` | Ticket pulse: KPIs, created vs. resolved per day, backlog breakdowns and the open tickets (`from`, `to`, `tz`) |
+| `GET /api/tickets/:id` | One ticket with description, tags and last comment |
 | `GET /api/cpi/check` | Step-by-step CPI connection test (no secrets in the result) |
 | `GET /healthz` | Database check (no login) |
 
@@ -220,6 +243,7 @@ src/
   middleware/        Basic auth, error handling
   cpi/client.js      CPI OData API client (OAuth2 client credentials)
   cpi/certificates.js keystore store/read in the database + expiry classification (Certificates menu)
+  tickets.js         Ticket pulse queries on the Freshservice tickets table (filled by n8n)
   poller/cpi.js      optional CPI MPL poller
   scripts/           db:init / db:seed, one-off poll
 public/              the web page (index.html, app.js, styles.css)
