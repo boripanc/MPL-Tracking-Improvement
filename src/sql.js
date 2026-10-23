@@ -212,6 +212,72 @@ SELECT json_build_object(
       SELECT message_guid, flow, log_start, left(errormsg, 300) AS errormsg FROM hit ORDER BY log_start DESC LIMIT 5) x)
 ) AS result`;
 
+/* ---------- Certificates (CPI keystore stored in the database) ---------- */
+
+// OData dates arrive as "/Date(1788213599000)/"; ISO strings are accepted too.
+const odataTs = (x) => `CASE WHEN ${x} LIKE '/Date(%' THEN to_timestamp(substring(${x} from '-?[0-9]+')::bigint / 1000.0)
+      WHEN COALESCE(${x}, '') = '' THEN NULL ELSE (${x})::timestamptz END`;
+
+// $1 = { source, entries: [raw KeystoreEntries records] }. Upserts all entries, marks entries that are no
+// longer in the keystore as removed and writes one row to cpi_keystore_sync. An empty list changes nothing.
+// The same statement is used by the n8n workflow "CPI Keystore → Postgres".
+const syncKeystore = `WITH p AS (SELECT $1::jsonb AS j),
+src AS (
+  SELECT r FROM p, jsonb_array_elements(COALESCE(p.j->'entries', '[]'::jsonb)) AS r
+  WHERE COALESCE(r->>'Alias', '') <> ''),
+rows AS (
+  SELECT DISTINCT ON (hexalias) * FROM (
+    SELECT COALESCE(NULLIF(r->>'Hexalias', ''), encode(convert_to(r->>'Alias', 'UTF8'), 'hex')) AS hexalias,
+           r->>'Alias' AS alias, r->>'Type' AS entry_type, r->>'KeyType' AS key_type,
+           CASE WHEN r->>'KeySize' ~ '^[0-9]+$' THEN (r->>'KeySize')::int END AS key_size,
+           r->>'Owner' AS owner, r->>'SubjectDN' AS subject_dn, r->>'IssuerDN' AS issuer_dn,
+           r->>'SerialNumber' AS serial_number, r->>'SignatureAlgorithm' AS signature_algorithm,
+           COALESCE(r->>'FingerprintSha256', r->>'FingerprintSha1') AS fingerprint_sha256,
+           ${odataTs("r->>'ValidNotBefore'")} AS valid_from,
+           ${odataTs("r->>'ValidNotAfter'")} AS valid_to,
+           r->>'LastModifiedBy' AS last_modified_by,
+           ${odataTs("r->>'LastModifiedTime'")} AS last_modified_time,
+           r - 'Certificate' - 'SigningRequest' - 'ChainCertificates' - 'ChainResource' - 'Sshkey' - '__metadata' AS raw
+    FROM src) x),
+up AS (
+  INSERT INTO cpi_keystore_entries (hexalias, alias, entry_type, key_type, key_size, owner, subject_dn, issuer_dn, serial_number,
+                                    signature_algorithm, fingerprint_sha256, valid_from, valid_to, last_modified_by,
+                                    last_modified_time, raw, first_seen_at, last_seen_at, removed_at)
+  SELECT hexalias, alias, entry_type, key_type, key_size, owner, subject_dn, issuer_dn, serial_number,
+         signature_algorithm, fingerprint_sha256, valid_from, valid_to, last_modified_by, last_modified_time, raw, now(), now(), NULL
+  FROM rows
+  ON CONFLICT (hexalias) DO UPDATE SET
+    alias = EXCLUDED.alias, entry_type = EXCLUDED.entry_type, key_type = EXCLUDED.key_type, key_size = EXCLUDED.key_size,
+    owner = EXCLUDED.owner, subject_dn = EXCLUDED.subject_dn, issuer_dn = EXCLUDED.issuer_dn, serial_number = EXCLUDED.serial_number,
+    signature_algorithm = EXCLUDED.signature_algorithm, fingerprint_sha256 = EXCLUDED.fingerprint_sha256,
+    valid_from = EXCLUDED.valid_from, valid_to = EXCLUDED.valid_to, last_modified_by = EXCLUDED.last_modified_by,
+    last_modified_time = EXCLUDED.last_modified_time, raw = EXCLUDED.raw, last_seen_at = now(), removed_at = NULL
+  RETURNING hexalias),
+gone AS (
+  UPDATE cpi_keystore_entries k SET removed_at = now()
+  WHERE k.removed_at IS NULL AND EXISTS (SELECT 1 FROM rows)
+    AND NOT EXISTS (SELECT 1 FROM rows WHERE rows.hexalias = k.hexalias)
+  RETURNING k.hexalias),
+log AS (
+  INSERT INTO cpi_keystore_sync (source, entries, removed)
+  SELECT COALESCE((SELECT j->>'source' FROM p), 'unknown'), (SELECT count(*) FROM up), (SELECT count(*) FROM gone)
+  WHERE EXISTS (SELECT 1 FROM rows)
+  RETURNING id, synced_at, source, entries, removed)
+SELECT (SELECT row_to_json(log) FROM log) AS result`;
+
+const readCertificates = `WITH p AS (SELECT $1::jsonb AS j)
+SELECT json_build_object(
+  'lastSync', (SELECT row_to_json(s) FROM (
+      SELECT synced_at, source, entries, removed FROM cpi_keystore_sync ORDER BY synced_at DESC, id DESC LIMIT 1) s),
+  'items', (SELECT COALESCE(json_agg(k), '[]') FROM (
+      SELECT hexalias, alias, entry_type, key_type, key_size, owner, subject_dn, issuer_dn, serial_number,
+             signature_algorithm, fingerprint_sha256, valid_from, valid_to, last_modified_by, last_modified_time,
+             first_seen_at, last_seen_at, removed_at
+      FROM cpi_keystore_entries
+      WHERE removed_at IS NULL OR (SELECT (j->>'includeRemoved')::boolean FROM p)
+      ORDER BY valid_to NULLS LAST, alias) k)
+) AS result`;
+
 /* ---------- Used by the optional CPI poller ---------- */
 
 // $1 = JSON array of MPL rows. Returns the GUIDs that still have no error text.
@@ -245,4 +311,5 @@ module.exports = {
   knownErrors, saveKnownError, deleteKnownError, addComment,
   categories, saveCategory, deleteCategory, testMatch,
   upsertMpls, upsertErrorInformation,
+  syncKeystore, readCertificates,
 };

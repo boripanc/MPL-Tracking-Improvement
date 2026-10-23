@@ -86,3 +86,38 @@ BEGIN
     ORDER BY message_processing_logs.correlation_id, message_processing_logs.log_start DESC NULLS LAST;
   END IF;
 END $$;
+
+-- ---------------------------------------------------------------------------------------------
+-- CPI keystore (Certificates menu). Filled by the n8n workflow "CPI Keystore → Postgres" or by
+-- this app's own sync; the web page only reads these tables.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS cpi_keystore_entries (
+  hexalias            text PRIMARY KEY,
+  alias               text NOT NULL,
+  entry_type          text,          -- Certificate, Key Pair, ...
+  key_type            text,          -- RSA, EC, ...
+  key_size            integer,
+  owner               text,          -- SAP or Tenant Administrator
+  subject_dn          text,
+  issuer_dn           text,
+  serial_number       text,
+  signature_algorithm text,
+  fingerprint_sha256  text,
+  valid_from          timestamptz,
+  valid_to            timestamptz,
+  last_modified_by    text,
+  last_modified_time  timestamptz,
+  raw                 jsonb,         -- CPI record without certificate/key material
+  first_seen_at       timestamptz NOT NULL DEFAULT now(),
+  last_seen_at        timestamptz NOT NULL DEFAULT now(),
+  removed_at          timestamptz    -- set when the entry is no longer in the keystore
+);
+CREATE INDEX IF NOT EXISTS cpi_keystore_entries_valid_to_idx ON cpi_keystore_entries (valid_to);
+
+CREATE TABLE IF NOT EXISTS cpi_keystore_sync (
+  id        serial PRIMARY KEY,
+  synced_at timestamptz NOT NULL DEFAULT now(),
+  source    text,                    -- n8n or app
+  entries   integer NOT NULL,
+  removed   integer NOT NULL
+);

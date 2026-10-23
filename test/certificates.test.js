@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const http = require('http');
 const net = require('net');
 const { setupDatabase, startApp } = require('./helpers');
-const { toCertificate, commonName, classify } = require('../src/cpi/certificates');
+const { commonName, classify } = require('../src/cpi/certificates');
 
 const DAY = 86400000;
 const odata = (ms) => `/Date(${ms})/`;
@@ -80,67 +80,129 @@ test('commonName and classify', () => {
   assert.equal(classify(null, now, t).state, 'unknown');
 });
 
-test('toCertificate maps keystore fields', () => {
-  const c = toCertificate(entry('partner_as2', 45), Date.now(), { criticalDays: 30, warnDays: 90 });
-  assert.equal(c.alias, 'partner_as2');
-  assert.equal(c.subject, 'partner_as2.example.com');
-  assert.equal(c.issuer, 'Example CA');
-  assert.equal(c.state, 'warning');
-  assert.equal(c.daysLeft, 46); // 45 days + 1 hour rounds up
-  assert.match(c.validTo, /^\d{4}-\d\d-\d\dT/);
+test('syncKeystore SQL stores raw CPI records, marks removed entries and logs the sync', async () => {
+  const SQL = require('../src/sql');
+  const sync = async (entries, source = 'n8n') => (await db.pool.query(SQL.syncKeystore, [JSON.stringify({ source, entries })])).rows[0].result;
+  await db.pool.query('TRUNCATE cpi_keystore_entries, cpi_keystore_sync');
+
+  const a = entry('partner_as2', 45, { Type: 'Key Pair', SerialNumber: '0xB92C8671', Certificate: 'MIIB...pem', SigningRequest: 'csr' });
+  const b = entry('old_cert', -10);
+  const r1 = await sync([a, b, { Alias: '' }]);
+  assert.equal(r1.entries, 2);
+  assert.equal(r1.removed, 0);
+  assert.equal(r1.source, 'n8n');
+
+  const { rows } = await db.pool.query("SELECT * FROM cpi_keystore_entries WHERE alias = 'partner_as2'");
+  assert.equal(rows[0].entry_type, 'Key Pair');
+  assert.equal(rows[0].key_size, 2048);
+  assert.equal(rows[0].serial_number, '0xB92C8671');
+  assert.ok(Math.abs(rows[0].valid_to.getTime() - Number(/\d+/.exec(a.ValidNotAfter)[0])) < 1000, 'OData date converted');
+  assert.equal(rows[0].raw.Certificate, undefined, 'certificate material is not stored');
+  assert.equal(rows[0].raw.__metadata, undefined);
+
+  // Next sync without old_cert -> it is marked removed; an empty list changes nothing.
+  const r2 = await sync([a], 'app');
+  assert.equal(r2.removed, 1);
+  assert.equal(await sync([]), null);
+  const after = await db.pool.query('SELECT alias, removed_at IS NOT NULL AS removed FROM cpi_keystore_entries ORDER BY alias');
+  assert.deepEqual(after.rows, [{ alias: 'old_cert', removed: true }, { alias: 'partner_as2', removed: false }]);
+  // It comes back when it reappears.
+  await sync([a, b]);
+  assert.equal((await db.pool.query("SELECT removed_at FROM cpi_keystore_entries WHERE alias = 'old_cert'")).rows[0].removed_at, null);
+  assert.equal((await db.pool.query('SELECT count(*)::int AS n FROM cpi_keystore_sync')).rows[0].n, 3);
 });
 
-test('GET /api/certificates reads all pages, classifies, sorts and caches', async () => {
+test('GET /api/certificates reads from the database, classifies and sorts', async () => {
+  const SQL = require('../src/sql');
+  await db.pool.query('TRUNCATE cpi_keystore_entries, cpi_keystore_sync');
+  const api = await startApp(db.pool);
+  try {
+    const empty = await api.call('GET', '/api/certificates');
+    assert.equal(empty.body.enabled, true);
+    assert.equal(empty.body.lastSync, null);
+    assert.equal(empty.body.stale, true);
+    assert.equal(empty.body.canSync, false);
+
+    await db.pool.query(SQL.syncKeystore, [JSON.stringify({ source: 'n8n', entries: [
+      entry('ok_cert', 400), entry('expired_cert', -5), entry('sap_cert', 20, { Owner: 'SAP', Type: 'Key Pair' }),
+      entry('soon_cert', 60), entry('no_end', 0, { ValidNotAfter: null }), entry('gone_cert', 10),
+    ] })]);
+    await db.pool.query(SQL.syncKeystore, [JSON.stringify({ source: 'n8n', entries: [
+      entry('ok_cert', 400), entry('expired_cert', -5), entry('sap_cert', 20, { Owner: 'SAP', Type: 'Key Pair' }),
+      entry('soon_cert', 60), entry('no_end', 0, { ValidNotAfter: null }),
+    ] })]);
+
+    const r = await api.call('GET', '/api/certificates');
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.items.map((c) => c.alias), ['expired_cert', 'sap_cert', 'soon_cert', 'ok_cert', 'no_end']);
+    assert.deepEqual(r.body.summary, { total: 5, expired: 1, critical: 1, warning: 1, ok: 1, unknown: 1, removed: 0 });
+    assert.equal(r.body.lastSync.source, 'n8n');
+    assert.equal(r.body.lastSync.entries, 5);
+    assert.equal(r.body.stale, false);
+    assert.equal(r.body.items[1].entryType, 'Key Pair');
+    assert.equal(r.body.items[1].subject, 'sap_cert.example.com');
+
+    const withRemoved = await api.call('GET', '/api/certificates?removed=1');
+    const gone = withRemoved.body.items.find((c) => c.alias === 'gone_cert');
+    assert.ok(gone.removedAt);
+    assert.equal(withRemoved.body.summary.removed, 1);
+    assert.equal(withRemoved.body.summary.total, 5, 'removed entries are not counted as active');
+
+    assert.equal((await api.call('POST', '/api/certificates/sync')).status, 409, 'no CPI connection here');
+    assert.equal((await api.call('GET', '/api/meta')).body.certificatesCanSync, false);
+  } finally {
+    await api.close();
+  }
+});
+
+test('POST /api/certificates/sync copies the keystore from CPI into the database', async () => {
+  await db.pool.query('TRUNCATE cpi_keystore_entries, cpi_keystore_sync');
   const cpi = await fakeCpi([
-    [entry('ok_cert', 400), entry('expired_cert', -5), entry('sap_cert', 20, { Owner: 'SAP', Type: 'Key Pair' })],
-    [entry('soon_cert', 60), entry('no_end', 0, { ValidNotAfter: null })],
+    [entry('a_cert', 400), entry('b_cert', -5)],
+    [entry('c_cert', 60)],
   ]);
   const api = await startApp(db.pool, cpiEnv(cpi.port));
   try {
-    const meta = await api.call('GET', '/api/meta');
-    assert.equal(meta.body.certificatesEnabled, true);
-
-    const r = await api.call('GET', '/api/certificates');
-    assert.equal(r.status, 200);
-    assert.equal(r.body.enabled, true);
-    assert.deepEqual(r.body.items.map((c) => c.alias), ['expired_cert', 'sap_cert', 'soon_cert', 'ok_cert', 'no_end']);
-    assert.deepEqual(r.body.summary, { total: 5, expired: 1, critical: 1, warning: 1, ok: 1, unknown: 1 });
-    assert.equal(r.body.criticalDays, 30);
-    assert.equal(r.body.warnDays, 90);
+    assert.equal((await api.call('GET', '/api/meta')).body.certificatesCanSync, true);
+    const s = await api.call('POST', '/api/certificates/sync');
+    assert.equal(s.status, 200);
+    assert.equal(s.body.entries, 3);
+    assert.equal(s.body.source, 'app');
     assert.equal(cpi.seen.keystore, 2, 'followed the __next link');
-
-    await api.call('GET', '/api/certificates');
-    assert.equal(cpi.seen.keystore, 2, 'second call is served from the cache');
-    await api.call('GET', '/api/certificates?refresh=1');
-    assert.equal(cpi.seen.keystore, 2, 'forced refresh right after a read is ignored');
+    const r = await api.call('GET', '/api/certificates');
+    assert.equal(r.body.canSync, true);
+    assert.equal(r.body.summary.total, 3);
+    assert.equal(r.body.summary.expired, 1);
   } finally {
     await api.close();
     cpi.server.close();
+  }
+
+  const failing = await fakeCpi([[]], { failWith: 403 });
+  const api2 = await startApp(db.pool, cpiEnv(failing.port));
+  try {
+    const r = await api2.call('POST', '/api/certificates/sync');
+    assert.equal(r.status, 502);
+    assert.match(r.body.error, /HTTP 403/);
+    assert.equal((await api2.call('GET', '/api/certificates')).body.summary.total, 3, 'a failed sync keeps the stored data');
+  } finally {
+    await api2.close();
+    failing.server.close();
   }
 });
 
-test('GET /api/certificates explains when CPI is not configured or fails', async () => {
-  const notSet = await startApp(db.pool);
-  try {
-    const r = await notSet.call('GET', '/api/certificates');
-    assert.equal(r.status, 200);
-    assert.equal(r.body.enabled, false);
-    assert.match(r.body.reason, /CPI_API_URL/);
-    assert.equal((await notSet.call('GET', '/api/meta')).body.certificatesEnabled, false);
-  } finally {
-    await notSet.close();
-  }
-
-  const cpi = await fakeCpi([[]], { failWith: 403 });
-  const api = await startApp(db.pool, cpiEnv(cpi.port));
+test('explains when the certificate tables do not exist yet', async () => {
+  const bare = await setupDatabase({ seed: false });
+  await bare.pool.query('DROP TABLE cpi_keystore_entries, cpi_keystore_sync');
+  const api = await startApp(bare.pool);
   try {
     const r = await api.call('GET', '/api/certificates');
-    assert.equal(r.status, 502);
-    assert.match(r.body.error, /HTTP 403/);
-    assert.match(r.body.error, /read the keystore/);
+    assert.equal(r.status, 200);
+    assert.equal(r.body.enabled, false);
+    assert.match(r.body.reason, /db:init|n8n/);
   } finally {
     await api.close();
-    cpi.server.close();
+    await bare.teardown();
   }
 });
 
@@ -165,17 +227,6 @@ test('CPI settings accept service-key names and fix common URL mistakes', () => 
   assert.deepEqual(missingCpiVars(loadConfig({ CPI_API_URL: 'https://x/api/v1', CPI_CLIENT_ID: 'a' })), ['CPI_TOKEN_URL', 'CPI_CLIENT_SECRET']);
 });
 
-test('the unconfigured message names the missing settings', async () => {
-  const api = await startApp(db.pool);
-  try {
-    const r = await api.call('GET', '/api/certificates');
-    assert.deepEqual(r.body.missing, ['CPI_API_URL', 'CPI_TOKEN_URL', 'CPI_CLIENT_ID', 'CPI_CLIENT_SECRET']);
-    assert.match(r.body.reason, /restart/);
-  } finally {
-    await api.close();
-  }
-});
-
 test('.env next to package.json is found even when started from another folder', () => {
   const { execFileSync } = require('child_process');
   const fs = require('fs');
@@ -196,7 +247,7 @@ test('.env next to package.json is found even when started from another folder',
   }
 });
 
-test('a non-JSON reply (wrong CPI_API_URL) gives a clear error', async () => {
+test('a non-JSON reply (wrong CPI_API_URL) gives a clear error on sync', async () => {
   const server = http.createServer((req, res) => {
     if (req.url.startsWith('/oauth/token')) { res.setHeader('Content-Type', 'application/json'); return res.end(JSON.stringify({ access_token: 'tok' })); }
     res.setHeader('Content-Type', 'text/html'); res.end('<html>Integration Suite</html>');
@@ -204,7 +255,7 @@ test('a non-JSON reply (wrong CPI_API_URL) gives a clear error', async () => {
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const api = await startApp(db.pool, cpiEnv(server.address().port));
   try {
-    const r = await api.call('GET', '/api/certificates');
+    const r = await api.call('POST', '/api/certificates/sync');
     assert.equal(r.status, 502);
     assert.match(r.body.error, /did not return JSON/);
   } finally {

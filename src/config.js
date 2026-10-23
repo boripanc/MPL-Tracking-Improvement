@@ -107,7 +107,10 @@ function loadConfig(env = process.env) {
     certificates: {
       criticalDays: Math.max(1, int(env.CERT_CRITICAL_DAYS, 30)),
       warnDays: Math.max(1, int(env.CERT_WARN_DAYS, 90)),
-      cacheMinutes: Math.max(0, int(env.CERT_CACHE_MINUTES, 15)),
+      // Only used when this server has a CPI connection: how often the app copies the keystore into the database.
+      syncIntervalMinutes: Math.max(5, int(env.CERT_SYNC_INTERVAL_MINUTES, 360)),
+      // The page warns when the last sync (by n8n or the app) is older than this.
+      staleHours: Math.max(1, int(env.CERT_STALE_HOURS, 26)),
     },
     poller: {
       enabled: bool(env.CPI_POLL_ENABLED, false),

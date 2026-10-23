@@ -4,7 +4,6 @@ const express = require('express');
 const SQL = require('../sql');
 const { queryResult } = require('../db');
 const { HttpError } = require('../middleware/errors');
-const { missingCpiVars } = require('../config');
 const { checkConnection } = require('../cpi/client');
 
 const STATUSES = ['Open', 'In Progress', 'Monitoring', 'Resolved'];
@@ -93,7 +92,7 @@ function apiRouter({ pool, config, certificates }) {
 
   router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 
-  router.get('/meta', handle(async () => ({ ...(await run(SQL.meta)), certificatesEnabled: Boolean(certificates) })));
+  router.get('/meta', handle(async () => ({ ...(await run(SQL.meta)), certificatesCanSync: certificates.canSync })));
 
   router.get('/dashboard', handle((req) => run(SQL.dashboard, range(req.query, config))));
 
@@ -187,25 +186,19 @@ function apiRouter({ pool, config, certificates }) {
     });
   }));
 
-  // Certificate expiry, read live from the CPI keystore (cached). ?refresh=1 forces a re-read.
-  router.get('/certificates', handle(async (req) => {
-    if (!certificates) {
-      const missing = missingCpiVars(config);
-      return {
-        enabled: false,
-        missing,
-        reason: `The server did not find these settings: ${missing.join(', ')}. Add them to the .env file next to package.json `
-          + '(or to the environment of the service / container) and restart the app.',
-      };
+  // Certificate expiry, read from the database (filled by the n8n workflow or the app's own sync).
+  router.get('/certificates', handle((req) => certificates.read({ includeRemoved: req.query.removed === '1' })));
+
+  // Copy the keystore from CPI into the database now (only when this server has a CPI connection).
+  router.post('/certificates/sync', handle(async () => {
+    if (!certificates.canSync) {
+      throw new HttpError(409, 'This server has no CPI connection, so it cannot sync. The n8n workflow "CPI Keystore → Postgres" keeps the data up to date.');
     }
-    // Avoid hammering CPI: a forced refresh is ignored if the last read was under 30 seconds ago.
-    const force = req.query.refresh === '1' && Date.now() - certificates.lastFetchedAt() > 30000;
     try {
-      return { enabled: true, ...(await certificates.get({ force })) };
+      return await certificates.sync({ source: 'app' });
     } catch (err) {
-      console.error('[certificates]', err.message);
-      const hint = err.status === 401 || err.status === 403 ? ' Check that the CPI service key may read the keystore.' : '';
-      throw new HttpError(502, `Could not read certificates from CPI: ${err.message}.${hint}`);
+      console.error('[certificates] sync failed:', err.message);
+      throw new HttpError(502, `Could not read the keystore from CPI: ${err.message}`);
     }
   }));
 

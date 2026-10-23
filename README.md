@@ -16,7 +16,7 @@ existing `errorscenario` view, so the app and the view always agree.
 | **Errors** | Filter by iFlow, status, category, analysis status and free text; page through results; export CSV. Clicking an error shows the full error text, category, root cause and solution, custom header properties, other messages with the same correlation ID, and a link to the CPI monitor. |
 | **Known errors & solutions** | Create / edit / delete entries in `error_analyzed`, set status (Open, In Progress, Monitoring, Resolved), add comments. A status change automatically adds a comment such as "Status changed from Open to Resolved by alice". |
 | **Categories** | Create / edit / delete rules in `error_category`, optionally limited to one iFlow, and see how many errors each rule catches. |
-| **Certificates** | Certificates and key pairs in the CPI tenant keystore with their expiry date and days left: **Expired**, **Expires soon** (< 30 days), **Expiring** (< 90 days) or **Valid**. Filter by status or type, hide SAP-owned entries, search, open the full details (subject, issuer, serial, fingerprint) and export CSV. The menu shows a red badge with the number of expired and soon-expiring entries. |
+| **Certificates** | Certificates and key pairs in the CPI tenant keystore (stored in the database by the n8n workflow) with their expiry date and days left: **Expired**, **Expires soon** (< 30 days), **Expiring** (< 90 days) or **Valid**. Filter by status or type, hide SAP-owned entries, search, open the full details (subject, issuer, serial, fingerprint) and export CSV. The menu shows a red badge with the number of expired and soon-expiring entries. |
 
 Both editors have a **Test against last 30 days** button that shows how many errors a pattern would match before you save it.
 
@@ -84,31 +84,40 @@ The server will not start without `DATABASE_URL`, or without `APP_USERS` unless 
 
 ## Certificate expiry
 
-The **Certificates** menu reads the tenant keystore live from the CPI OData API (`KeystoreEntries`), so it needs the
-same CPI connection settings as the poller (`CPI_API_URL`, `CPI_TOKEN_URL`, `CPI_CLIENT_ID`, `CPI_CLIENT_SECRET`).
-The poller itself does not have to be enabled. Without these settings the menu explains what to configure.
+The **Certificates** menu reads from the database, so the web server does **not** need access to CPI.
+The CPI keystore is copied into two tables (created automatically, also in `db/schema.sql`):
 
-You can copy the values straight from the service key: `CPI_URL` (= `url`), `CPI_TOKENURL` (= `tokenurl`),
-`CPI_CLIENTID` and `CPI_CLIENTSECRET` are accepted as well, `/api/v1` is added to the URL and `/oauth/token` to the
-token URL when missing. At start-up the log says either
-`[certificates] enabled, reading the keystore from <host>` or `[certificates] disabled, missing: <variables>`;
-the Certificates screen shows the same list.
+- `cpi_keystore_entries`: one row per keystore entry: alias, type, owner, subject, issuer, serial number,
+  `valid_from` / `valid_to`, and when it was first seen, last seen and removed from the keystore.
+  Certificate and key material is **not** stored.
+- `cpi_keystore_sync`: one row per sync (time, source, number of entries, number removed).
 
-`.env` is read from the folder next to `package.json` (and from the current folder), so it is found when the app is
-started by PM2, systemd or from another directory. With Docker, pass it explicitly
-(`docker run --env-file .env ...`); `docker compose` passes it automatically.
+**Who fills the tables**
 
-The service key's client must be allowed to read the keystore; if it is not, the screen shows the HTTP 401/403 error
-from CPI. Nothing is stored in the database.
+1. **n8n workflow "CPI Keystore → Postgres"** (recommended). It runs every 6 hours: it creates the tables if needed,
+   reads `GET /api/v1/KeystoreEntries` with the tenant's OAuth credential and stores the result with the same SQL as
+   the app (`syncKeystore` in `src/sql.js`). Entries that disappear from the keystore are marked as removed, not deleted.
+2. **The app itself**, only if this server can reach CPI and the CPI connection is set
+   (`CPI_API_URL`, `CPI_TOKEN_URL`, `CPI_CLIENT_ID`, `CPI_CLIENT_SECRET`; the service-key names `CPI_URL`, `CPI_TOKENURL`,
+   `CPI_CLIENTID`, `CPI_CLIENTSECRET` work too). It then syncs every `CERT_SYNC_INTERVAL_MINUTES` and shows a
+   **Sync from CPI now** and a **Test CPI connection** button.
+
+The screen shows when the data was last synced, and warns when that is older than `CERT_STALE_HOURS`
+(for example if the n8n workflow stopped). Tick **Show removed** to see entries that were deleted from the keystore.
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `CERT_CRITICAL_DAYS` | `30` | Fewer days left than this → **Expires soon** (red, counted in the menu badge). |
 | `CERT_WARN_DAYS` | `90` | Fewer days left than this → **Expiring** (amber). |
-| `CERT_CACHE_MINUTES` | `15` | How long the keystore is cached. **Re-read from CPI** forces a new read (at most every 30 seconds). |
+| `CERT_STALE_HOURS` | `26` | Warn on the screen when the last sync is older than this. |
+| `CERT_SYNC_INTERVAL_MINUTES` | `360` | Only with a CPI connection on this server: how often the app syncs. |
 
-### When the Certificates screen shows an error
+`.env` is read from the folder next to `package.json` (and from the current folder). With Docker, pass it explicitly
+(`docker run --env-file .env ...`); `docker compose` passes it automatically.
 
+### When the app's own CPI sync fails
+
+This only matters if the app syncs the keystore itself (the n8n workflow does not need it).
 Press **Test CPI connection** on the Certificates screen, or run `npm run check:cpi` on the server. Both test the
 settings, the OAuth token, the keystore and the message logs one step at a time, and say what to fix. The usual
 causes on company servers:
@@ -183,7 +192,8 @@ All endpoints are under `/api`, require login and return JSON. Errors return `{ 
 | `PUT /api/categories/:id` | Update (same body) |
 | `DELETE /api/categories/:id` | Delete |
 | `POST /api/test-match` | `{ kind: "like" \| "regex", pattern, flow }` → matches in the last 30 days |
-| `GET /api/certificates` | Keystore entries with `state` (expired / critical / warning / ok / unknown), `daysLeft` and a summary. `?refresh=1` re-reads CPI |
+| `GET /api/certificates` | Keystore entries from the database with `state` (expired / critical / warning / ok / unknown), `daysLeft`, a summary and the last sync. `?removed=1` includes removed entries |
+| `POST /api/certificates/sync` | Copy the keystore from CPI into the database now (only when this server has a CPI connection; otherwise 409) |
 | `GET /api/cpi/check` | Step-by-step CPI connection test (no secrets in the result) |
 | `GET /healthz` | Database check (no login) |
 
@@ -209,7 +219,7 @@ src/
   routes/api.js      REST API and input validation
   middleware/        Basic auth, error handling
   cpi/client.js      CPI OData API client (OAuth2 client credentials)
-  cpi/certificates.js keystore read + expiry classification (Certificates menu)
+  cpi/certificates.js keystore store/read in the database + expiry classification (Certificates menu)
   poller/cpi.js      optional CPI MPL poller
   scripts/           db:init / db:seed, one-off poll
 public/              the web page (index.html, app.js, styles.css)

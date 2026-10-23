@@ -62,15 +62,15 @@ function loadMeta() {
     S.meta = m;
     $('#polled').textContent = m.lastPolled ? 'Data polled ' + dt(m.lastPolled) : '';
     $('#tabs button[data-t="certs"]').hidden = false;
-    if (m.certificatesEnabled && !S.cache.certs) {
-      // Fill the menu badge in the background; failures are shown on the Certificates screen itself.
-      get('api/certificates').then(function (d) { S.cache.certs = d; setCertBadge(d.summary); }).catch(function () {});
+    if (!S.cache.certs) {
+      // Fill the menu badge in the background (from the database); problems are shown on the Certificates screen.
+      get('api/certificates').then(function (d) { if (d.enabled) { S.cache.certs = d; setCertBadge(d.summary); } }).catch(function () {});
     }
   });
 }
 function refreshAll() {
   S.cache.known = null;
-  if (S.tab === 'certs') return loadCerts(true).catch(fail);
+  if (S.tab === 'certs') return loadCerts().catch(fail);
   return loadMeta().then(load).catch(fail);
 }
 
@@ -418,9 +418,12 @@ function openCategory(c) {
 
 /* ---------- Certificates ---------- */
 var CERT_STATES = { expired: 'Expired', critical: 'Expires soon', warning: 'Expiring', ok: 'Valid', unknown: 'No end date' };
-S.cf = { state: '', type: '', hideSap: false, q: '' };
+S.cf = { state: '', type: '', hideSap: false, q: '', showRemoved: false };
 
-function certPill(c) { return '<span class="pill cert-' + esc(c.state) + '">' + esc(CERT_STATES[c.state] || c.state) + '</span>'; }
+function certPill(c) {
+  if (c.removedAt) return '<span class="pill">Removed</span>';
+  return '<span class="pill cert-' + esc(c.state) + '">' + esc(CERT_STATES[c.state] || c.state) + '</span>';
+}
 function daysText(c) {
   if (c.daysLeft == null) return '–';
   if (c.state === 'expired') return c.daysLeft === 0 ? 'expired today' : 'expired ' + fmt(-c.daysLeft) + ' d ago';
@@ -437,7 +440,10 @@ function certsShell() {
     '<div class="filters mt"><select id="cf-state" aria-label="Status"></select><select id="cf-type" aria-label="Type"></select>' +
     '<label class="check"><input type="checkbox" id="cf-sap"> Hide SAP-owned</label>' +
     '<input id="cf-q" type="search" placeholder="Search alias, subject, issuer or serial number" style="min-width:240px;flex:1">' +
-    '<button class="btn" id="cf-refresh">Re-read from CPI</button><button class="btn" id="cf-csv">Export CSV</button><button class="btn" id="cf-check">Test CPI connection</button></div>' +
+    '<label class="check"><input type="checkbox" id="cf-removed"> Show removed</label>' +
+    '<button class="btn" id="cf-csv">Export CSV</button>' +
+    '<button class="btn" id="cf-sync" hidden>Sync from CPI now</button><button class="btn" id="cf-check" hidden>Test CPI connection</button></div>' +
+    '<div id="cert-sync"></div>' +
     '<div class="card"><div class="row" style="margin-bottom:8px"><b id="cert-count"></b><span class="sp"></span><span class="muted small" id="cert-fetched"></span></div><div class="scroll" id="cert-tab"></div></div>' +
     '<p class="muted small" id="cert-note"></p>';
 }
@@ -446,7 +452,8 @@ function bindCerts() {
   $('#cf-type').onchange = function () { S.cf.type = this.value; renderCerts(); };
   $('#cf-sap').onchange = function () { S.cf.hideSap = this.checked; renderCerts(); };
   $('#cf-q').oninput = function () { S.cf.q = this.value.trim().toLowerCase(); renderCerts(); };
-  $('#cf-refresh').onclick = function () { loadCerts(true).catch(fail); };
+  $('#cf-removed').onchange = function () { S.cf.showRemoved = this.checked; loadCerts().catch(fail); };
+  $('#cf-sync').onclick = syncCerts;
   $('#cf-csv').onclick = exportCertCsv;
   $('#cf-check').onclick = checkCpi;
 }
@@ -463,27 +470,35 @@ function checkCpi() {
       '<p class="muted small">The same test runs on the server with: npm run check:cpi</p>');
   }).catch(function (e) { openDrawer(drawerHead('CPI connection test') + '<div class="empty bad">' + esc(e.message) + '</div>'); });
 }
-function loadCerts(force) {
+function loadCerts() {
   var v = $('#v-certs');
   if (!$('#cert-tab', v)) { v.innerHTML = certsShell(); bindCerts(); }
-  $('#cert-tab').innerHTML = '<div class="empty">' + (force ? 'Reading the keystore from CPI…' : 'Loading…') + '</div>';
-  return get('api/certificates', force ? { refresh: 1 } : {}).then(function (d) {
-    S.cache.certs = d;
+  $('#cert-tab').innerHTML = '<div class="empty">Loading…</div>';
+  return get('api/certificates', S.cf.showRemoved ? { removed: 1 } : {}).then(function (d) {
     if (!d.enabled) {
-      v.innerHTML = '<div class="card"><h2>Certificate monitoring is not set up</h2><p class="muted">' + esc(d.reason) + '</p></div>';
+      v.innerHTML = '<div class="card"><h2>Certificates are not available yet</h2><p class="muted">' + esc(d.reason) + '</p></div>';
       return;
     }
+    S.cache.certs = d;
     setCertBadge(d.summary);
     renderCerts();
-    if (force) toast('Certificates re-read from CPI');
   }, function (e) {
-    $('#cert-tab').innerHTML = '<div class="empty"><p class="bad">' + esc(e.message) + '</p><button class="btn pri" id="cf-check2">Test CPI connection</button></div>';
-    $('#cf-check2').onclick = checkCpi;
+    $('#cert-tab').innerHTML = '<div class="empty bad">' + esc(e.message) + '</div>';
   });
+}
+function syncCerts() {
+  var b = $('#cf-sync');
+  b.disabled = true;
+  b.textContent = 'Syncing…';
+  request('POST', 'api/certificates/sync').then(function (r) {
+    toast('Synced ' + r.entries + ' keystore entries from CPI' + (r.removed ? ', ' + r.removed + ' removed' : ''));
+    return loadCerts();
+  }).catch(fail).then(function () { b.disabled = false; b.textContent = 'Sync from CPI now'; });
 }
 function certMatches(c, f) {
   if (f.state === 'attention' && ['expired', 'critical', 'warning'].indexOf(c.state) < 0) return false;
   if (f.state && f.state !== 'attention' && c.state !== f.state) return false;
+  if (f.state && c.removedAt) return false;
   if (f.type && c.entryType !== f.type) return false;
   if (f.hideSap && /^sap$/i.test(c.owner)) return false;
   if (f.q && [c.alias, c.subjectDN, c.issuerDN, c.serialNumber].join(' ').toLowerCase().indexOf(f.q) < 0) return false;
@@ -511,11 +526,20 @@ function renderCerts() {
   $('#cf-state').innerHTML = opts([['', 'All statuses'], ['attention', 'Needs attention (expired or expiring)'], ['expired', 'Expired'], ['critical', 'Expires within ' + d.criticalDays + ' days'], ['warning', 'Expires within ' + d.warnDays + ' days'], ['ok', 'Valid']], f.state);
   $('#cf-type').innerHTML = opts([['', 'All types']].concat(types.sort().map(function (t) { return [t, t]; })), f.type);
   $('#cf-sap').checked = f.hideSap;
-  $('#cert-fetched').textContent = 'Read from CPI ' + dt(d.fetchedAt);
-  $('#cert-note').textContent = 'Expires soon = less than ' + d.criticalDays + ' days left; Expiring = less than ' + d.warnDays + ' days (CERT_CRITICAL_DAYS / CERT_WARN_DAYS). The keystore is re-read at most every few minutes; use "Re-read from CPI" after renewing a certificate.';
+  $('#cf-removed').checked = f.showRemoved;
+  $('#cf-sync').hidden = !d.canSync;
+  $('#cf-check').hidden = !d.canSync;
+  var ls = d.lastSync;
+  $('#cert-fetched').textContent = ls ? 'Last synced from CPI ' + dt(ls.at) + ' (' + (ls.source || 'unknown') + ', ' + fmt(ls.entries) + ' entries)' : 'Never synced';
+  $('#cert-sync').innerHTML = !ls
+    ? '<div class="card mt" style="margin-bottom:12px"><b class="bad">No keystore data yet.</b> <span class="muted">Run the n8n workflow "CPI Keystore → Postgres" once' + (d.canSync ? ' or press "Sync from CPI now"' : '') + '.</span></div>'
+    : d.stale
+      ? '<div class="card" style="margin-bottom:12px"><b class="bad">This data may be out of date:</b> <span class="muted">the last sync was ' + esc(dt(ls.at)) + ', more than ' + d.staleHours + ' hours ago. Check that the n8n workflow "CPI Keystore → Postgres" is active and succeeds.</span></div>'
+      : '';
+  $('#cert-note').textContent = 'Expires soon = less than ' + d.criticalDays + ' days left; Expiring = less than ' + d.warnDays + ' days (CERT_CRITICAL_DAYS / CERT_WARN_DAYS). The data comes from the database, which the n8n workflow "CPI Keystore → Postgres" fills from the CPI keystore.';
   var rows = d.items.filter(function (c) { return certMatches(c, f); });
   S.cache.certRows = rows;
-  $('#cert-count').textContent = fmt(rows.length) + ' of ' + fmt(d.items.length) + ' entries';
+  $('#cert-count').textContent = fmt(rows.length) + ' of ' + fmt(d.items.length) + ' entries' + (d.summary.removed ? ' (' + fmt(d.summary.removed) + ' removed)' : '');
   if (!rows.length) { $('#cert-tab').innerHTML = '<div class="empty">No certificates match these filters.</div>'; return; }
   $('#cert-tab').innerHTML = '<table><thead><tr><th>Status</th><th>Alias</th><th>Type</th><th>Subject</th><th>Issuer</th><th>Valid until</th><th class="num">Days left</th><th>Owner</th></tr></thead><tbody>' +
     rows.map(function (c, i) {
@@ -536,9 +560,11 @@ function openCert(c) {
       kv('Subject', '<span class="mono">' + esc(c.subjectDN) + '</span>') + kv('Issuer', '<span class="mono">' + esc(c.issuerDN) + '</span>') +
       kv('Serial number', '<span class="mono">' + esc(c.serialNumber) + '</span>') + kv('Signature algorithm', esc(c.signatureAlgorithm)) +
       kv('Fingerprint', '<span class="mono">' + esc(c.fingerprintSha256) + '</span>') +
-      kv('Last changed', esc([dtFull(c.lastModifiedTime), c.lastModifiedBy].filter(Boolean).join(' by '))) +
+      kv('Last changed in CPI', esc([dtFull(c.lastModifiedTime), c.lastModifiedBy].filter(Boolean).join(' by '))) +
+      kv('First seen', esc(dtFull(c.firstSeenAt))) + kv('Last seen in keystore', esc(dtFull(c.lastSeenAt))) +
+      (c.removedAt ? kv('Removed from keystore', '<b>' + esc(dtFull(c.removedAt)) + '</b>') : '') +
     '</div>' +
-    '<p class="muted small" style="margin-top:20px">Renew the entry in Integration Suite under Monitor → Integrations and APIs → Manage Security → Keystore, then press "Re-read from CPI".</p>');
+    '<p class="muted small" style="margin-top:20px">Renew the entry in Integration Suite under Monitor → Integrations and APIs → Manage Security → Keystore. The change shows here after the next sync.</p>');
 }
 function exportCertCsv() {
   var rows = S.cache.certRows || [];

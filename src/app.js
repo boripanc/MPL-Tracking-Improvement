@@ -8,7 +8,7 @@ const { basicAuth } = require('./middleware/auth');
 const { errorHandler } = require('./middleware/errors');
 const { cpiConfigured } = require('./config');
 const { createClient } = require('./cpi/client');
-const { createCertificateService } = require('./cpi/certificates');
+const { createCertificateStore } = require('./cpi/certificates');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const VERSION = require('../package.json').version;
@@ -53,11 +53,12 @@ function securityHeaders(req, res, next) {
 /** Creates the Express application. `pool` is a pg Pool, `config` comes from loadConfig(). */
 function createApp({ pool, config, certificates }) {
   const app = express();
-  if (certificates === undefined && cpiConfigured(config)) {
-    certificates = createCertificateService({
-      client: createClient(config.poller),
+  if (!certificates) {
+    certificates = createCertificateStore({
+      pool,
+      client: cpiConfigured(config) ? createClient(config.poller) : null,
       thresholds: { criticalDays: config.certificates.criticalDays, warnDays: config.certificates.warnDays },
-      cacheMinutes: config.certificates.cacheMinutes,
+      staleHours: config.certificates.staleHours,
     });
   }
   app.disable('x-powered-by');
@@ -77,13 +78,14 @@ function createApp({ pool, config, certificates }) {
 
   app.use(basicAuth(config.auth));
   app.use(express.json({ limit: '100kb' }));
-  app.use('/api', apiRouter({ pool, config, certificates: certificates || null }));
+  app.use('/api', apiRouter({ pool, config, certificates }));
   app.get('/vendor/chart.umd.js', (req, res) => res.sendFile(CHART_JS, { maxAge: '7d' }));
   // index.html, app.js and styles.css must always match each other, so the browser re-validates them on every
   // load (a cheap 304 when unchanged) instead of keeping an old copy after an upgrade.
   app.get(['/', '/index.html'], (req, res) => res.type('html').set('Cache-Control', 'no-cache').send(indexHtml()));
   app.use(express.static(PUBLIC_DIR, { index: false, setHeaders: (res) => res.set('Cache-Control', 'no-cache') }));
   app.use(errorHandler);
+  app.locals.certificates = certificates;
   return app;
 }
 
