@@ -141,6 +141,8 @@ comment). The menu shows a red badge with the number of overdue tickets.
 
 It reads the `tickets` table that the **n8n workflow "FreshServices Tickets"** fills (one row per ticket, keyed by
 `human_display_id`). The app only reads it and does not create it. Open = any status except Resolved and Closed.
+Tickets tagged `noncharge` / `noncharged` and tickets whose Change Process Type (`change_process_type`) is
+Standard, Normal or Emergency are left out of every number, chart and list.
 Missing optional columns (such as `last_comment_*` or `tags`) are shown as empty; if the table is missing, the
 screen says so. The screen warns when the newest ticket change is older than `TICKETS_STALE_HOURS`, which usually
 means the workflow has not run or its Freshservice cookie expired.

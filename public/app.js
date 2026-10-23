@@ -652,7 +652,7 @@ function loadTickets() {
         '<input id="tf-q" type="search" placeholder="Search ticket, subject, requester or entity" style="min-width:240px;flex:1">' +
         '<button class="btn" id="tf-clear">Clear filters</button><button class="btn" id="tf-csv">Export CSV</button></div>' +
       '<div class="card"><div class="row" style="margin-bottom:8px"><b id="tk-count"></b><span class="sp"></span><span class="muted small">Newest ticket change ' + esc(dt(d.lastChange)) + '</span></div><div class="scroll" id="tk-tab"></div></div>' +
-      '<p class="muted small">Freshservice tickets from the database table the n8n workflow "FreshServices Tickets" fills. Open = any status except Resolved and Closed. Due soon = due within ' + d.dueSoonHours + ' hours (TICKETS_DUE_SOON_HOURS).</p>';
+      '<p class="muted small">Freshservice tickets from the database table the n8n workflow "FreshServices Tickets" fills. Open = any status except Resolved and Closed. Tickets tagged noncharge and changes (Standard, Normal, Emergency) are left out. Due soon = due within ' + d.dueSoonHours + ' hours (TICKETS_DUE_SOON_HOURS).</p>';
     $('#tf-q').value = S.tf.q;
     $('#tf-view').onchange = function () { S.tf.view = this.value; renderTickets(); };
     $('#tf-grp').onchange = function () { S.tf.grp = this.value; renderTickets(); };

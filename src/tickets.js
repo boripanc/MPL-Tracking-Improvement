@@ -27,6 +27,7 @@ const COLUMNS = {
   frt_secs: { col: 'first_resp_time_in_secs', type: 'numeric' },
   resolution_secs: { col: 'resolution_time_in_secs', type: 'numeric' },
   tags: { col: 'tags', type: 'text' },
+  change_process_type: { col: 'change_process_type', type: 'text' },
   details: { col: 'details', type: 'text' },
   last_comment_at: { col: 'last_comment_at', type: 'timestamptz' },
   last_comment_by: { col: 'last_comment_by', type: 'text' },
@@ -35,6 +36,9 @@ const COLUMNS = {
 };
 
 const CLOSED_STATUSES = ['Resolved', 'Closed'];
+// Left out of Ticket pulse: non-chargeable tickets (tag) and change tickets (Change Process Type).
+const EXCLUDED_TAGS = ['noncharge', 'noncharged'];
+const EXCLUDED_CHANGE_TYPES = ['Standard', 'Normal', 'Emergency'];
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function quoteIdent(name) {
@@ -83,13 +87,24 @@ function createTicketStore({ pool, config }) {
     const select = Object.entries(COLUMNS).map(([alias, c]) => (have.has(c.col)
       ? `NULLIF(${quoteIdent(c.col)}::text, '')::${c.type} AS ${alias}`
       : `NULL::${c.type} AS ${alias}`)).join(',\n    ');
-    return { ok: true, select };
+    // Same exclusions as the n8n fetch, applied again here because a ticket can get the tag or change type
+    // after it was stored.
+    const where = [];
+    if (have.has('tags')) {
+      where.push(`NOT EXISTS (SELECT 1 FROM unnest(string_to_array(lower(COALESCE(${quoteIdent('tags')}::text, '')), ',')) AS tg
+                    WHERE btrim(tg) IN (${EXCLUDED_TAGS.map((t) => `'${t}'`).join(', ')}))`);
+    }
+    if (have.has('change_process_type')) {
+      where.push(`COALESCE(btrim(${quoteIdent('change_process_type')}::text), '') NOT IN (${EXCLUDED_CHANGE_TYPES.map((t) => `'${t}'`).join(', ')})`);
+    }
+    return { ok: true, select, where: where.length ? 'WHERE ' + where.join('\n    AND ') : '' };
   }
 
-  const tk = (select) => `tk AS (
-  SELECT ${select},
+  const tk = (src) => `tk AS (
+  SELECT ${src.select},
     COALESCE(${quoteIdent(COLUMNS.status.col)}, '') IN (${closedList}) AS closed
-  FROM ${table.sql})`;
+  FROM ${table.sql}
+  ${src.where})`;
 
   async function pulse({ from, to, tz }) {
     const src = await source();
@@ -101,7 +116,7 @@ rng AS (
          COALESCE(NULLIF(j->>'tz', ''), 'Asia/Bangkok') AS tz,
          (j->>'soonHours')::int AS soon
   FROM p),
-${tk(src.select)},
+${tk(src)},
 o AS (SELECT tk.*, now() - created_at AS age FROM tk WHERE NOT closed),
 created AS (SELECT tk.* FROM tk, rng WHERE created_at >= rng.f AND created_at < rng.t),
 resolved AS (SELECT tk.* FROM tk, rng WHERE closed AND updated_at >= rng.f AND updated_at < rng.t),
@@ -170,7 +185,7 @@ SELECT json_build_object(
   async function ticket(id) {
     const src = await source();
     if (!src.ok) return null;
-    const { rows } = await pool.query(`WITH ${tk(src.select)} SELECT row_to_json(tk) AS t FROM tk WHERE id = $1 LIMIT 1`, [id]);
+    const { rows } = await pool.query(`WITH ${tk(src)} SELECT row_to_json(tk) AS t FROM tk WHERE id = $1 LIMIT 1`, [id]);
     if (!rows.length) return null;
     const t = rows[0].t;
     t.link = ticketLink(config.tickets.linkTemplate, t.id);
@@ -180,4 +195,4 @@ SELECT json_build_object(
   return { pulse, ticket };
 }
 
-module.exports = { createTicketStore, parseTableName, ticketLink, CLOSED_STATUSES };
+module.exports = { createTicketStore, parseTableName, ticketLink, CLOSED_STATUSES, EXCLUDED_TAGS, EXCLUDED_CHANGE_TYPES };

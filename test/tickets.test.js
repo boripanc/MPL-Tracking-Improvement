@@ -41,6 +41,16 @@ test.before(async () => {
         r[1] === 'Pending' ? 'Waiting for customer' : null, 'Details of ' + r[0], 'Ann', 'Checked the log'],
     );
   }
+  // Excluded from the pulse: non-chargeable tags and change tickets. All are open, old and overdue.
+  const excluded = [['INC-201', 'Hypercare, NonCharge', null], ['INC-202', 'noncharged', null], ['INC-203', null, 'Standard'],
+    ['INC-204', 'EDI', 'Normal'], ['INC-205', null, 'Emergency']];
+  for (const [id, tags, change] of excluded) {
+    await db.pool.query(
+      `INSERT INTO tickets (human_display_id, status_name, "group", created_at, updated_at, due_by, tags, change_process_type)
+       VALUES ($1, 'Open', 'EDI Support', $2, $2, $2, $3, $4)`, [id, ago(24 * 100), tags, change]);
+  }
+  await db.pool.query(`INSERT INTO tickets (human_display_id, status_name, "group", created_at, updated_at, tags, change_process_type)
+    VALUES ('INC-206', 'Resolved', 'EDI Support', $1, $1, 'EDI,charge', 'Not a change')`, [ago(24 * 200)]);
   api = await startApp(db.pool, { TICKET_URL: 'https://itservice.example.com/a/tickets/{number}' });
 });
 test.after(async () => {
@@ -53,7 +63,7 @@ test('pulse counts open, overdue, unassigned, created and resolved tickets', asy
   assert.equal(r.status, 200);
   const d = r.body;
   assert.equal(d.enabled, true);
-  assert.equal(d.total, 6);
+  assert.equal(d.total, 7); // 6 above + INC-206; INC-201..205 are excluded
   assert.equal(d.kpi.open, 4);
   assert.equal(d.kpi.overdue, 2);
   assert.equal(d.kpi.dueSoon, 1); // INC-101, due in 10 hours (SR-104 is due in 100 hours)
@@ -76,6 +86,14 @@ test('pulse breaks the open backlog down and lists overdue tickets first', async
   assert.equal(d.series.reduce((s, p) => s + p.created, 0), 4);
   assert.equal(d.series.reduce((s, p) => s + p.resolved, 0), 1);
   assert.ok(d.series.length >= 7, 'one bucket per day, including empty days');
+});
+
+test('noncharge tickets and Standard / Normal / Emergency changes are left out', async () => {
+  const d = (await api.call('GET', '/api/tickets/pulse')).body;
+  assert.equal(d.aging.find((a) => a.name === '> 90 days').n, 0);
+  assert.ok(!d.open.some((t) => /^INC-20/.test(t.id)));
+  assert.equal((await api.call('GET', '/api/tickets/INC-201')).status, 404);
+  assert.equal((await api.call('GET', '/api/tickets/INC-206')).status, 200);
 });
 
 test('ticket detail returns the description and last comment', async () => {
