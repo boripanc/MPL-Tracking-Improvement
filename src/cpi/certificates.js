@@ -66,9 +66,14 @@ async function fetchKeystoreEntries(client) {
     const res = await client.request(path);
     if (!res.ok) {
       const detail = (await res.text()).slice(0, 200);
-      const err = new Error(`CPI keystore request failed: HTTP ${res.status}${detail ? ` ${detail}` : ''}`);
+      const hint = res.status === 404 ? ' (check that CPI_API_URL ends in /api/v1)' : '';
+      const err = new Error(`CPI keystore request failed: HTTP ${res.status}${hint}${detail ? ` ${detail}` : ''}`);
       err.status = res.status;
       throw err;
+    }
+    if (!/json/i.test(res.headers.get('content-type') || '')) {
+      throw new Error('CPI did not return JSON. CPI_API_URL must be the tenant API address ending in /api/v1 '
+        + '(the "url" of the service key, usually ...it-cpiNNN...), not the Integration Suite web address');
     }
     const d = (await res.json()).d || {};
     entries.push(...(d.results || []));

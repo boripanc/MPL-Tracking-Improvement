@@ -29,6 +29,54 @@ function parseTrustProxy(value) {
   return Number.isInteger(n) ? n : value;
 }
 
+// Accepts the names used in this app and the field names of the SAP service key (url, tokenurl, clientid, ...).
+const CPI_VARS = {
+  apiUrl: ['CPI_API_URL', 'CPI_URL', 'CPI_BASE_URL'],
+  tokenUrl: ['CPI_TOKEN_URL', 'CPI_TOKENURL'],
+  clientId: ['CPI_CLIENT_ID', 'CPI_CLIENTID'],
+  clientSecret: ['CPI_CLIENT_SECRET', 'CPI_CLIENTSECRET'],
+};
+
+function firstSet(env, names) {
+  for (const n of names) {
+    const v = env[n] === undefined || env[n] === null ? '' : String(env[n]).trim();
+    if (v) return v;
+  }
+  return '';
+}
+
+/** Normalises the CPI API URL: the service key's `url` (tenant host) gets /api/v1 appended. */
+function normaliseApiUrl(url) {
+  if (!url) return '';
+  let u = url.replace(/\/+$/, '');
+  if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+  if (!/\/api\/v1$/i.test(u)) u += '/api/v1';
+  return u;
+}
+
+/** Normalises the token URL: the service key's `tokenurl` sometimes comes without /oauth/token. */
+function normaliseTokenUrl(url) {
+  if (!url) return '';
+  let u = url.replace(/\/+$/, '');
+  if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+  if (!/\/oauth\/token$/i.test(u)) u += '/oauth/token';
+  return u;
+}
+
+function cpiConnection(env) {
+  return {
+    apiUrl: normaliseApiUrl(firstSet(env, CPI_VARS.apiUrl)),
+    tokenUrl: normaliseTokenUrl(firstSet(env, CPI_VARS.tokenUrl)),
+    clientId: firstSet(env, CPI_VARS.clientId),
+    clientSecret: firstSet(env, CPI_VARS.clientSecret),
+  };
+}
+
+/** Names of the CPI connection variables that are still missing (empty when fully configured). */
+function missingCpiVars(config) {
+  return Object.keys(CPI_VARS).filter((k) => !config.poller[k]).map((k) => CPI_VARS[k][0]);
+}
+
 /** Builds the configuration object from environment variables (process.env by default). */
 function loadConfig(env = process.env) {
   const schema = env.DB_SCHEMA || 'public';
@@ -63,10 +111,7 @@ function loadConfig(env = process.env) {
     },
     poller: {
       enabled: bool(env.CPI_POLL_ENABLED, false),
-      apiUrl: (env.CPI_API_URL || '').replace(/\/+$/, ''),
-      tokenUrl: env.CPI_TOKEN_URL || '',
-      clientId: env.CPI_CLIENT_ID || '',
-      clientSecret: env.CPI_CLIENT_SECRET || '',
+      ...cpiConnection(env),
       intervalMinutes: Math.max(1, int(env.CPI_POLL_INTERVAL_MINUTES, 60)),
       lookbackHours: Math.max(1, int(env.CPI_POLL_LOOKBACK_HOURS, 24)),
       statuses,
@@ -85,18 +130,15 @@ function validateConfig(config) {
   if (!config.auth.disabled && config.auth.users.length === 0) {
     problems.push('APP_USERS is empty. Set APP_USERS=user:password (or AUTH_DISABLED=true for local development only).');
   }
-  const cpiKeys = ['apiUrl', 'tokenUrl', 'clientId', 'clientSecret'];
-  const cpiSet = cpiKeys.filter((k) => config.poller[k]);
-  if (cpiSet.length > 0 && cpiSet.length < cpiKeys.length) {
-    problems.push(`CPI connection is partly configured; also set: ${cpiKeys.filter((k) => !config.poller[k]).join(', ')} (see CPI_* variables).`);
+  const missing = missingCpiVars(config);
+  if (missing.length > 0 && missing.length < 4) {
+    problems.push(`CPI connection is partly configured; also set: ${missing.join(', ')}.`);
   }
   if (config.certificates.criticalDays > config.certificates.warnDays) {
     problems.push('CERT_CRITICAL_DAYS must not be larger than CERT_WARN_DAYS.');
   }
-  if (config.poller.enabled) {
-    for (const key of ['apiUrl', 'tokenUrl', 'clientId', 'clientSecret']) {
-      if (!config.poller[key]) problems.push(`CPI poller is enabled but ${key} is missing (see CPI_* variables).`);
-    }
+  if (config.poller.enabled && missing.length === 4) {
+    problems.push('CPI_POLL_ENABLED=true but the CPI connection is not set (CPI_API_URL, CPI_TOKEN_URL, CPI_CLIENT_ID, CPI_CLIENT_SECRET).');
   }
   return problems;
 }
@@ -107,4 +149,4 @@ function cpiConfigured(config) {
   return Boolean(p.apiUrl && p.tokenUrl && p.clientId && p.clientSecret);
 }
 
-module.exports = { loadConfig, validateConfig, cpiConfigured };
+module.exports = { loadConfig, validateConfig, cpiConfigured, missingCpiVars };

@@ -1,7 +1,8 @@
 'use strict';
 
-require('dotenv').config();
-const { loadConfig, validateConfig } = require('./config');
+const { loadEnvFiles } = require('./env');
+const envFiles = loadEnvFiles();
+const { loadConfig, validateConfig, cpiConfigured, missingCpiVars } = require('./config');
 const { createPool } = require('./db');
 const { createApp } = require('./app');
 const { startPoller } = require('./poller/cpi');
@@ -13,6 +14,13 @@ if (problems.length) {
   process.exit(1);
 }
 if (config.auth.disabled) console.warn('[auth] AUTH_DISABLED=true: anyone who can reach this server can read and change data.');
+
+console.log(envFiles.length ? `Settings read from ${envFiles.join(', ')} and the environment` : 'No .env file found; using environment variables only');
+if (cpiConfigured(config)) {
+  console.log(`[certificates] enabled, reading the keystore from ${new URL(config.poller.apiUrl).host}`);
+} else {
+  console.log(`[certificates] disabled, missing: ${missingCpiVars(config).join(', ')}`);
+}
 
 const pool = createPool(config.db);
 const app = createApp({ pool, config });

@@ -2,7 +2,8 @@
 
 // npm run db:init        -> creates any missing tables / view (safe on an existing database)
 // npm run db:seed        -> db:init + loads sample data into an EMPTY database (local development only)
-require('dotenv').config();
+const { loadEnvFiles } = require('../env');
+loadEnvFiles();
 const fs = require('fs');
 const path = require('path');
 const { loadConfig } = require('../config');

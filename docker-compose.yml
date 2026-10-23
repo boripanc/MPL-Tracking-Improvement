@@ -19,6 +19,11 @@ services:
     build: .
     ports:
       - "3000:3000"
+    # Your .env (CPI connection, certificate thresholds, ...) is passed into the container.
+    env_file:
+      - path: .env
+        required: false
+    # These two override .env so the trial always uses the sample database above.
     environment:
       DATABASE_URL: postgres://cpi:cpi@db:5432/cpi_error_center
       APP_USERS: admin:admin

@@ -140,3 +140,66 @@ test('config rejects a partly configured CPI connection', () => {
   const problems = validateConfig(loadConfig({ DATABASE_URL: 'x', APP_USERS: 'a:b', CPI_API_URL: 'https://x/api/v1' }));
   assert.ok(problems.some((p) => /partly configured/.test(p)));
 });
+
+test('CPI settings accept service-key names and fix common URL mistakes', () => {
+  const { loadConfig, missingCpiVars, cpiConfigured } = require('../src/config');
+  const c = loadConfig({
+    CPI_URL: 'int-prod-tug.it-cpi012.cfapps.ap21.hana.ondemand.com/',
+    CPI_TOKENURL: 'https://sub.authentication.ap21.hana.ondemand.com',
+    CPI_CLIENTID: ' sb-id ',
+    CPI_CLIENTSECRET: 'secret',
+  });
+  assert.equal(c.poller.apiUrl, 'https://int-prod-tug.it-cpi012.cfapps.ap21.hana.ondemand.com/api/v1');
+  assert.equal(c.poller.tokenUrl, 'https://sub.authentication.ap21.hana.ondemand.com/oauth/token');
+  assert.equal(c.poller.clientId, 'sb-id');
+  assert.ok(cpiConfigured(c));
+  assert.deepEqual(missingCpiVars(loadConfig({ CPI_API_URL: 'https://x/api/v1', CPI_CLIENT_ID: 'a' })), ['CPI_TOKEN_URL', 'CPI_CLIENT_SECRET']);
+});
+
+test('the unconfigured message names the missing settings', async () => {
+  const api = await startApp(db.pool);
+  try {
+    const r = await api.call('GET', '/api/certificates');
+    assert.deepEqual(r.body.missing, ['CPI_API_URL', 'CPI_TOKEN_URL', 'CPI_CLIENT_ID', 'CPI_CLIENT_SECRET']);
+    assert.match(r.body.reason, /restart/);
+  } finally {
+    await api.close();
+  }
+});
+
+test('.env next to package.json is found even when started from another folder', () => {
+  const { execFileSync } = require('child_process');
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const envFile = path.join(__dirname, '..', '.env');
+  if (fs.existsSync(envFile)) return; // never touch a real .env
+  fs.writeFileSync(envFile, 'CPI_API_URL=https://from-dotenv.example\n');
+  try {
+    const out = execFileSync(process.execPath, ['-e',
+      "const l=require(process.argv[1]).loadEnvFiles(); console.log(JSON.stringify({ l, v: process.env.CPI_API_URL }))",
+      path.join(__dirname, '..', 'src', 'env.js')], { cwd: os.tmpdir(), env: { PATH: process.env.PATH } }).toString();
+    const r = JSON.parse(out);
+    assert.equal(r.v, 'https://from-dotenv.example');
+    assert.deepEqual(r.l, [envFile]);
+  } finally {
+    fs.unlinkSync(envFile);
+  }
+});
+
+test('a non-JSON reply (wrong CPI_API_URL) gives a clear error', async () => {
+  const server = http.createServer((req, res) => {
+    if (req.url.startsWith('/oauth/token')) { res.setHeader('Content-Type', 'application/json'); return res.end(JSON.stringify({ access_token: 'tok' })); }
+    res.setHeader('Content-Type', 'text/html'); res.end('<html>Integration Suite</html>');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const api = await startApp(db.pool, cpiEnv(server.address().port));
+  try {
+    const r = await api.call('GET', '/api/certificates');
+    assert.equal(r.status, 502);
+    assert.match(r.body.error, /did not return JSON/);
+  } finally {
+    await api.close();
+    server.close();
+  }
+});

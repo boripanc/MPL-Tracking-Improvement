@@ -1,7 +1,8 @@
 'use strict';
 
 // Runs the CPI poller once (npm run poll). Useful from cron or for a manual backfill.
-require('dotenv').config();
+const { loadEnvFiles } = require('../env');
+loadEnvFiles();
 const { loadConfig } = require('../config');
 const { createPool } = require('../db');
 const { pollOnce } = require('../poller/cpi');

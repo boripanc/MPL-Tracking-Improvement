@@ -4,6 +4,7 @@ const express = require('express');
 const SQL = require('../sql');
 const { queryResult } = require('../db');
 const { HttpError } = require('../middleware/errors');
+const { missingCpiVars } = require('../config');
 
 const STATUSES = ['Open', 'In Progress', 'Monitoring', 'Resolved'];
 const MPL_STATUSES = ['FAILED', 'ESCALATED', 'RETRY'];
@@ -188,7 +189,13 @@ function apiRouter({ pool, config, certificates }) {
   // Certificate expiry, read live from the CPI keystore (cached). ?refresh=1 forces a re-read.
   router.get('/certificates', handle(async (req) => {
     if (!certificates) {
-      return { enabled: false, reason: 'Set CPI_API_URL, CPI_TOKEN_URL, CPI_CLIENT_ID and CPI_CLIENT_SECRET to show certificates.' };
+      const missing = missingCpiVars(config);
+      return {
+        enabled: false,
+        missing,
+        reason: `The server did not find these settings: ${missing.join(', ')}. Add them to the .env file next to package.json `
+          + '(or to the environment of the service / container) and restart the app.',
+      };
     }
     // Avoid hammering CPI: a forced refresh is ignored if the last read was under 30 seconds ago.
     const force = req.query.refresh === '1' && Date.now() - certificates.lastFetchedAt() > 30000;

@@ -88,6 +88,16 @@ The **Certificates** menu reads the tenant keystore live from the CPI OData API 
 same CPI connection settings as the poller (`CPI_API_URL`, `CPI_TOKEN_URL`, `CPI_CLIENT_ID`, `CPI_CLIENT_SECRET`).
 The poller itself does not have to be enabled. Without these settings the menu explains what to configure.
 
+You can copy the values straight from the service key: `CPI_URL` (= `url`), `CPI_TOKENURL` (= `tokenurl`),
+`CPI_CLIENTID` and `CPI_CLIENTSECRET` are accepted as well, `/api/v1` is added to the URL and `/oauth/token` to the
+token URL when missing. At start-up the log says either
+`[certificates] enabled, reading the keystore from <host>` or `[certificates] disabled, missing: <variables>`;
+the Certificates screen shows the same list.
+
+`.env` is read from the folder next to `package.json` (and from the current folder), so it is found when the app is
+started by PM2, systemd or from another directory. With Docker, pass it explicitly
+(`docker run --env-file .env ...`); `docker compose` passes it automatically.
+
 The service key's client must be allowed to read the keystore; if it is not, the screen shows the HTTP 401/403 error
 from CPI. Nothing is stored in the database.
 
