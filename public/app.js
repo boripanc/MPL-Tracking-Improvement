@@ -437,7 +437,7 @@ function certsShell() {
     '<div class="filters mt"><select id="cf-state" aria-label="Status"></select><select id="cf-type" aria-label="Type"></select>' +
     '<label class="check"><input type="checkbox" id="cf-sap"> Hide SAP-owned</label>' +
     '<input id="cf-q" type="search" placeholder="Search alias, subject, issuer or serial number" style="min-width:240px;flex:1">' +
-    '<button class="btn" id="cf-refresh">Re-read from CPI</button><button class="btn" id="cf-csv">Export CSV</button></div>' +
+    '<button class="btn" id="cf-refresh">Re-read from CPI</button><button class="btn" id="cf-csv">Export CSV</button><button class="btn" id="cf-check">Test CPI connection</button></div>' +
     '<div class="card"><div class="row" style="margin-bottom:8px"><b id="cert-count"></b><span class="sp"></span><span class="muted small" id="cert-fetched"></span></div><div class="scroll" id="cert-tab"></div></div>' +
     '<p class="muted small" id="cert-note"></p>';
 }
@@ -448,6 +448,20 @@ function bindCerts() {
   $('#cf-q').oninput = function () { S.cf.q = this.value.trim().toLowerCase(); renderCerts(); };
   $('#cf-refresh').onclick = function () { loadCerts(true).catch(fail); };
   $('#cf-csv').onclick = exportCertCsv;
+  $('#cf-check').onclick = checkCpi;
+}
+function checkCpi() {
+  openDrawer(drawerHead('CPI connection test') + '<div class="empty">Testing the connection to CPI…</div>');
+  get('api/cpi/check').then(function (r) {
+    openDrawer(drawerHead('CPI connection test') +
+      '<p>' + (r.ok ? pill('Connection works', 'Resolved') : pill('Problem found', 'Open')) + '</p>' +
+      r.steps.map(function (st) {
+        return '<div class="box" style="margin:8px 0"><div class="row">' + (st.ok ? pill('OK', 'Resolved') : pill('Failed', 'Open')) +
+          '<b>' + esc(st.name) + '</b>' + (st.ms != null ? '<span class="muted small">' + st.ms + ' ms</span>' : '') + '</div>' +
+          '<div class="small" style="margin-top:6px;word-break:break-word">' + esc(st.detail) + '</div></div>';
+      }).join('') +
+      '<p class="muted small">The same test runs on the server with: npm run check:cpi</p>');
+  }).catch(function (e) { openDrawer(drawerHead('CPI connection test') + '<div class="empty bad">' + esc(e.message) + '</div>'); });
 }
 function loadCerts(force) {
   var v = $('#v-certs');
@@ -463,8 +477,8 @@ function loadCerts(force) {
     renderCerts();
     if (force) toast('Certificates re-read from CPI');
   }, function (e) {
-    $('#cert-tab').innerHTML = '<div class="empty bad">' + esc(e.message) + '</div>';
-    throw e;
+    $('#cert-tab').innerHTML = '<div class="empty"><p class="bad">' + esc(e.message) + '</p><button class="btn pri" id="cf-check2">Test CPI connection</button></div>';
+    $('#cf-check2').onclick = checkCpi;
   });
 }
 function certMatches(c, f) {

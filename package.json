@@ -1,6 +1,6 @@
 {
   "name": "cpi-error-center",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "Dashboard and knowledge base for SAP CPI message processing log (MPL) errors, backed by PostgreSQL.",
   "private": true,
   "main": "src/server.js",
@@ -11,6 +11,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "poll": "node src/scripts/poll-once.js",
+    "check:cpi": "node src/scripts/check-cpi.js",
     "db:init": "node src/scripts/init-db.js",
     "db:seed": "node src/scripts/init-db.js --seed",
     "test": "node --test --test-concurrency=1 \"test/**/*.test.js\""
@@ -19,6 +20,7 @@
     "chart.js": "4.4.1",
     "dotenv": "16.4.5",
     "express": "4.21.2",
-    "pg": "8.13.1"
+    "pg": "8.13.1",
+    "undici": "6.21.3"
   }
 }

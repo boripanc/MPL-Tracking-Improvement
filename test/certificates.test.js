@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('http');
+const net = require('net');
 const { setupDatabase, startApp } = require('./helpers');
 const { toCertificate, commonName, classify } = require('../src/cpi/certificates');
 
@@ -210,4 +211,131 @@ test('a non-JSON reply (wrong CPI_API_URL) gives a clear error', async () => {
     await api.close();
     server.close();
   }
+});
+
+/* ---------- CPI connection check, proxy and network errors ---------- */
+
+const { checkConnection, describeNetworkError } = require('../src/cpi/client');
+
+function cpiCfg(port, secret = 'secret') {
+  return {
+    apiUrl: `http://127.0.0.1:${port}/api/v1`, tokenUrl: `http://127.0.0.1:${port}/oauth/token`,
+    clientId: 'id', clientSecret: secret, requestTimeoutMs: 5000,
+  };
+}
+
+function strictCpi({ keystoreStatus = 200 } = {}) {
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://x');
+    res.setHeader('Content-Type', 'application/json');
+    if (url.pathname === '/oauth/token') {
+      if (req.headers.authorization !== 'Basic ' + Buffer.from('id:secret').toString('base64')) {
+        res.statusCode = 401;
+        return res.end(JSON.stringify({ error: 'invalid_client', error_description: 'Bad credentials' }));
+      }
+      return res.end(JSON.stringify({ access_token: 'tok', expires_in: 3600 }));
+    }
+    if (req.headers.authorization !== 'Bearer tok') { res.statusCode = 401; return res.end('{}'); }
+    if (url.pathname === '/api/v1/KeystoreEntries') {
+      if (keystoreStatus !== 200) { res.statusCode = keystoreStatus; return res.end('{"error":"Forbidden"}'); }
+      return res.end(JSON.stringify({ d: { results: [entry('a', 100), entry('b', 5)] } }));
+    }
+    if (url.pathname === '/api/v1/MessageProcessingLogs') return res.end(JSON.stringify({ d: { results: [{}] } }));
+    res.statusCode = 404;
+    res.end('{}');
+  });
+  return new Promise((r) => server.listen(0, '127.0.0.1', () => r(server)));
+}
+
+test('checkConnection reports each step', async () => {
+  const server = await strictCpi();
+  try {
+    const ok = await checkConnection(cpiCfg(server.address().port), { env: {} });
+    assert.equal(ok.ok, true);
+    assert.deepEqual(ok.steps.map((s) => s.name), ['Settings', 'Get OAuth token', 'Read keystore (Certificates)', 'Read message processing logs']);
+    assert.match(ok.steps[2].detail, /2 entries/);
+    assert.ok(!JSON.stringify(ok).includes('secret'), 'never returns the secret');
+
+    const badSecret = await checkConnection(cpiCfg(server.address().port, 'wrong'), { env: {} });
+    assert.equal(badSecret.ok, false);
+    assert.equal(badSecret.steps.at(-1).name, 'Get OAuth token');
+    assert.match(badSecret.steps.at(-1).detail, /HTTP 401 Bad credentials.*CPI_CLIENT_SECRET/);
+
+    const missing = await checkConnection({ ...cpiCfg(1), clientSecret: '' }, { env: {} });
+    assert.match(missing.steps[0].detail, /Missing: clientSecret/);
+  } finally {
+    server.close();
+  }
+  const forbidden = await strictCpi({ keystoreStatus: 403 });
+  try {
+    const r = await checkConnection(cpiCfg(forbidden.address().port), { env: {} });
+    const ks = r.steps.find((s) => s.name.startsWith('Read keystore'));
+    assert.equal(ks.ok, false);
+    assert.match(ks.detail, /HTTP 403.*not allowed/);
+  } finally {
+    forbidden.close();
+  }
+});
+
+test('GET /api/cpi/check is available to logged-in users', async () => {
+  const server = await strictCpi();
+  const api = await startApp(db.pool, cpiEnv(server.address().port));
+  try {
+    const r = await api.call('GET', '/api/cpi/check');
+    assert.equal(r.status, 200);
+    assert.equal(r.body.ok, true);
+    assert.equal((await api.call('GET', '/api/cpi/check', undefined, { Authorization: '' })).status, 401);
+  } finally {
+    await api.close();
+    server.close();
+  }
+});
+
+test('requests go through HTTP_PROXY when it is set', async () => {
+  const target = await strictCpi();
+  let proxied = 0;
+  // Minimal forward proxy for plain-HTTP targets (absolute-URI requests).
+  const proxy = http.createServer((req, res) => {
+    proxied++;
+    const u = new URL(req.url);
+    const fwd = http.request({ host: u.hostname, port: u.port, path: u.pathname + u.search, method: req.method, headers: req.headers }, (r) => {
+      res.writeHead(r.statusCode, r.headers);
+      r.pipe(res);
+    });
+    req.pipe(fwd);
+  });
+  // undici tunnels through the proxy with CONNECT, like real HTTPS traffic does.
+  proxy.on('connect', (req, socket, head) => {
+    proxied++;
+    const [host, port] = req.url.split(':');
+    const upstream = net.connect(Number(port), host, () => {
+      socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      if (head && head.length) upstream.write(head);
+      upstream.pipe(socket);
+      socket.pipe(upstream);
+    });
+    upstream.on('error', () => socket.destroy());
+    socket.on('error', () => upstream.destroy());
+  });
+  await new Promise((r) => proxy.listen(0, '127.0.0.1', r));
+  try {
+    const env = { HTTP_PROXY: `http://127.0.0.1:${proxy.address().port}`, NO_PROXY: '' };
+    const r = await checkConnection(cpiCfg(target.address().port), { env });
+    assert.equal(r.ok, true, JSON.stringify(r.steps));
+    assert.match(r.steps[0].detail, /proxy http:\/\/127\.0\.0\.1/);
+    assert.ok(proxied >= 1, 'traffic went through the proxy');
+  } finally {
+    proxy.close();
+    target.close();
+  }
+});
+
+test('network failures get an explanation instead of "fetch failed"', () => {
+  const url = 'https://tenant.example/api/v1/KeystoreEntries';
+  const wrap = (code, message = 'x') => Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error(message), { code }) });
+  assert.match(describeNetworkError(wrap('ENOTFOUND'), url), /tenant\.example.*could not be resolved.*HTTPS_PROXY/);
+  assert.match(describeNetworkError(wrap('UNABLE_TO_GET_ISSUER_CERT_LOCALLY'), url), /NODE_EXTRA_CA_CERTS/);
+  assert.match(describeNetworkError(wrap('UND_ERR_CONNECT_TIMEOUT'), url), /proxy/);
+  assert.match(describeNetworkError(wrap('UND_ERR_ABORTED', 'Proxy response (403) !== 200 when HTTP Tunneling'), url), /proxy refused.*403.*allow tenant\.example/);
+  assert.match(describeNetworkError(Object.assign(new Error('t'), { name: 'TimeoutError' }), url), /No answer/);
 });

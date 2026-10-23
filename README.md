@@ -107,6 +107,21 @@ from CPI. Nothing is stored in the database.
 | `CERT_WARN_DAYS` | `90` | Fewer days left than this → **Expiring** (amber). |
 | `CERT_CACHE_MINUTES` | `15` | How long the keystore is cached. **Re-read from CPI** forces a new read (at most every 30 seconds). |
 
+### When the Certificates screen shows an error
+
+Press **Test CPI connection** on the Certificates screen, or run `npm run check:cpi` on the server. Both test the
+settings, the OAuth token, the keystore and the message logs one step at a time, and say what to fix. The usual
+causes on company servers:
+
+| Message | Fix |
+| --- | --- |
+| *host name could not be resolved* / *timed out* | The server reaches the internet through a proxy: set `HTTPS_PROXY=http://proxy:port` (and `NO_PROXY` for internal hosts such as the database). |
+| *proxy refused the connection (HTTP 403)* | Ask the network team to allow the CPI and token hosts through the proxy. |
+| *TLS certificate not trusted* | Company TLS inspection: set `NODE_EXTRA_CA_CERTS=/path/to/company-root-ca.pem`. |
+| *OAuth token request failed: HTTP 401* | Wrong `CPI_CLIENT_ID` / `CPI_CLIENT_SECRET`, or they come from a different service key than `CPI_TOKEN_URL`. |
+| *Read keystore … HTTP 403* | The service key may not read the keystore; add the role to the service instance. |
+| *Got text/html instead of JSON* | `CPI_API_URL` points to the web UI instead of the tenant API (`…it-cpiNNN…/api/v1`). |
+
 ## Optional: pull errors from CPI directly
 
 The app can replace the n8n workflow that copies CPI error MPLs into the database. It does the same thing:
@@ -169,6 +184,7 @@ All endpoints are under `/api`, require login and return JSON. Errors return `{ 
 | `DELETE /api/categories/:id` | Delete |
 | `POST /api/test-match` | `{ kind: "like" \| "regex", pattern, flow }` → matches in the last 30 days |
 | `GET /api/certificates` | Keystore entries with `state` (expired / critical / warning / ok / unknown), `daysLeft` and a summary. `?refresh=1` re-reads CPI |
+| `GET /api/cpi/check` | Step-by-step CPI connection test (no secrets in the result) |
 | `GET /healthz` | Database check (no login) |
 
 ## Development

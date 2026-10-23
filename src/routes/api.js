@@ -5,6 +5,7 @@ const SQL = require('../sql');
 const { queryResult } = require('../db');
 const { HttpError } = require('../middleware/errors');
 const { missingCpiVars } = require('../config');
+const { checkConnection } = require('../cpi/client');
 
 const STATUSES = ['Open', 'In Progress', 'Monitoring', 'Resolved'];
 const MPL_STATUSES = ['FAILED', 'ESCALATED', 'RETRY'];
@@ -207,6 +208,9 @@ function apiRouter({ pool, config, certificates }) {
       throw new HttpError(502, `Could not read certificates from CPI: ${err.message}.${hint}`);
     }
   }));
+
+  // Step-by-step CPI connection test (settings, OAuth token, keystore, message logs). Never returns secrets.
+  router.get('/cpi/check', handle(() => checkConnection(config.poller)));
 
   router.use((req, res) => res.status(404).json({ error: 'Not found' }));
   return router;
