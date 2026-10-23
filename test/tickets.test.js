@@ -151,3 +151,23 @@ test('open list and detail include category, sub-category and item', async () =>
   const detail = (await api.call('GET', '/api/tickets/INC-102')).body;
   assert.deepEqual([detail.category, detail.sub_category, detail.item], ['Integration', 'EDI', 'AS2']);
 });
+
+test('closed tickets missing Issue Summary, Correction Solution or Root Cause are listed', async () => {
+  let d = (await api.call('GET', '/api/tickets/pulse?view=year')).body;
+  assert.equal(d.closure.stored, false); // the columns are not in the table yet
+  await db.pool.query('ALTER TABLE tickets ADD COLUMN issue_summary text, ADD COLUMN correction_solution text, ADD COLUMN root_cause text');
+  await db.pool.query(`UPDATE tickets SET issue_summary = '<p>Mapping failed</p>', correction_solution = 'Fixed mapping', root_cause = '<p>&nbsp;</p>'
+    WHERE human_display_id = 'INC-105'`);
+  await db.pool.query(`UPDATE tickets SET issue_summary = 'x', correction_solution = 'y', root_cause = 'z' WHERE human_display_id = 'INC-206'`);
+  d = (await api.call('GET', '/api/tickets/pulse?view=year')).body;
+  assert.equal(d.closure.stored, true);
+  assert.equal(d.closure.closed, 3); // INC-105, INC-106 and INC-206 were resolved or closed this past year
+  assert.equal(d.closure.incomplete, 2);
+  assert.deepEqual(d.closure.rows.find((r) => r.id === 'INC-106').missing, ['issue_summary', 'correction_solution', 'root_cause']);
+  const ids = d.closure.rows.map((r) => r.id);
+  assert.ok(ids.includes('INC-105'));
+  assert.ok(!ids.includes('INC-206'));
+  assert.deepEqual(d.closure.rows.find((r) => r.id === 'INC-105').missing, ['root_cause']);
+  const detail = (await api.call('GET', '/api/tickets/INC-105')).body;
+  assert.equal(detail.correction_solution, 'Fixed mapping');
+});

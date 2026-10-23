@@ -146,6 +146,10 @@ It reads the `tickets` table that the **n8n workflow "FreshServices Tickets"** f
 `human_display_id`). The app only reads it and does not create it. Open = any status except Resolved and Closed.
 Tickets tagged `noncharge` / `noncharged` and tickets whose Change Process Type (`change_process_type`) is
 Standard, Normal or Emergency are left out of every number, chart and list.
+**Closed tickets missing closure notes** lists tickets resolved or closed in the selected period whose
+Issue/Investigation Summary, Correction Solution or Root Cause is empty (columns `issue_summary`,
+`correction_solution`, `root_cause`, from the Freshservice custom fields of the same names; HTML-only blanks
+such as `<p>&nbsp;</p>` count as empty). Until the n8n workflow stores those columns, the card says so.
 Missing optional columns (such as `last_comment_*` or `tags`) are shown as empty; if the table is missing, the
 screen says so. The screen warns when the newest ticket change is older than `TICKETS_STALE_HOURS`, which usually
 means the workflow has not run or its Freshservice cookie expired.
