@@ -1,0 +1,27 @@
+# Local trial: app + a throw-away PostgreSQL with sample data.
+#   docker compose up --build      then open http://localhost:3000 (admin / admin)
+# For production, run only the app service and point DATABASE_URL at your real database.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cpi
+      POSTGRES_PASSWORD: cpi
+      POSTGRES_DB: cpi_error_center
+    volumes:
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./db/seed-sample.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cpi -d cpi_error_center"]
+      interval: 5s
+      retries: 10
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgres://cpi:cpi@db:5432/cpi_error_center
+      APP_USERS: admin:admin
+    depends_on:
+      db:
+        condition: service_healthy
