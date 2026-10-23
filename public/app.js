@@ -693,14 +693,14 @@ function renderTickets() {
   if (!rows.length) { $('#tk-tab').innerHTML = '<div class="empty">No open tickets match these filters.</div>'; return; }
   $('#tk-tab').innerHTML = '<table><thead><tr><th>Ticket</th><th>Subject</th><th>Status</th><th>Group</th><th>Responder</th><th class="num">Age</th><th>Due</th><th>Last comment</th></tr></thead><tbody>' +
     rows.map(function (t, i) {
-      return '<tr class="click" data-i="' + i + '"><td class="nowrap"><b>' + esc(t.id) + '</b>' + (t.type ? '<div class="muted small">' + esc(t.type) + '</div>' : '') + '</td>' +
+      return '<tr class="click" data-i="' + i + '"><td class="nowrap"><b>' + (t.link ? '<a href="' + esc(t.link) + '" target="_blank" rel="noopener" title="Open in Freshservice" data-ext>' + esc(t.id) + ' ↗</a>' : esc(t.id)) + '</b>' + (t.type ? '<div class="muted small">' + esc(t.type) + '</div>' : '') + '</td>' +
         '<td>' + esc(short(t.subject, 120)) + (t.requester || t.entity ? '<div class="muted small">' + esc([t.requester, t.entity].filter(Boolean).join(' · ')) + '</div>' : '') + '</td>' +
         '<td>' + pill(t.status, 'tk') + (t.pending_reason ? '<div class="muted small">' + esc(t.pending_reason) + '</div>' : '') + '</td>' +
         '<td class="small">' + esc(t.grp || '') + '</td><td class="small">' + (t.responder ? esc(t.responder) : '<span class="bad">Unassigned</span>') + '</td>' +
         '<td class="num nowrap">' + ageText(t.created_at) + '</td><td class="nowrap">' + dueText(t.due_by) + '</td>' +
         '<td class="small nowrap">' + (t.last_comment_at ? esc(dt(t.last_comment_at)) + '<div class="muted">' + esc([t.last_comment_by, t.last_comment_type].filter(Boolean).join(' · ')) + '</div>' : '<span class="muted">–</span>') + '</td></tr>';
     }).join('') + '</tbody></table>';
-  $$('#tk-tab tr[data-i]').forEach(function (t) { t.onclick = function () { openTicket(rows[+t.dataset.i].id); }; });
+  $$('#tk-tab tr[data-i]').forEach(function (t) { t.onclick = function (e) { if (e.target.closest('[data-ext]')) return; openTicket(rows[+t.dataset.i].id); }; });
 }
 function drawTickets(d) {
   if (!window.Chart) return;
