@@ -7,6 +7,7 @@
  */
 
 const SQL = require('../sql');
+const { createClient } = require('../cpi/client');
 
 const CHUNK = 500;
 
@@ -45,43 +46,6 @@ function toRow(r) {
 function buildFilter(statuses, since) {
   const status = statuses.map((s) => `Status eq '${s}'`).join(' or ');
   return `(${status}) and LogStart gt datetime'${since.toISOString().slice(0, 19)}'`;
-}
-
-function createClient(cfg) {
-  let token = null;
-  let tokenExpires = 0;
-
-  async function getToken() {
-    if (token && Date.now() < tokenExpires - 60000) return token;
-    const res = await fetch(cfg.tokenUrl, {
-      method: 'POST',
-      headers: {
-        Authorization: 'Basic ' + Buffer.from(`${cfg.clientId}:${cfg.clientSecret}`).toString('base64'),
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: 'grant_type=client_credentials',
-      signal: AbortSignal.timeout(cfg.requestTimeoutMs),
-    });
-    if (!res.ok) throw new Error(`CPI token request failed: HTTP ${res.status}`);
-    const body = await res.json();
-    token = body.access_token;
-    tokenExpires = Date.now() + (Number(body.expires_in) || 3600) * 1000;
-    return token;
-  }
-
-  async function request(path, { accept = 'application/json', retry = true } = {}) {
-    const res = await fetch(cfg.apiUrl + path, {
-      headers: { Authorization: `Bearer ${await getToken()}`, Accept: accept },
-      signal: AbortSignal.timeout(cfg.requestTimeoutMs),
-    });
-    if (res.status === 401 && retry) {
-      token = null;
-      return request(path, { accept, retry: false });
-    }
-    return res;
-  }
-
-  return { request };
 }
 
 async function fetchErrorMpls(client, cfg, since) {

@@ -56,6 +56,11 @@ function loadConfig(env = process.env) {
       schema,
       max: int(env.PG_POOL_MAX, 10),
     },
+    certificates: {
+      criticalDays: Math.max(1, int(env.CERT_CRITICAL_DAYS, 30)),
+      warnDays: Math.max(1, int(env.CERT_WARN_DAYS, 90)),
+      cacheMinutes: Math.max(0, int(env.CERT_CACHE_MINUTES, 15)),
+    },
     poller: {
       enabled: bool(env.CPI_POLL_ENABLED, false),
       apiUrl: (env.CPI_API_URL || '').replace(/\/+$/, ''),
@@ -80,6 +85,14 @@ function validateConfig(config) {
   if (!config.auth.disabled && config.auth.users.length === 0) {
     problems.push('APP_USERS is empty. Set APP_USERS=user:password (or AUTH_DISABLED=true for local development only).');
   }
+  const cpiKeys = ['apiUrl', 'tokenUrl', 'clientId', 'clientSecret'];
+  const cpiSet = cpiKeys.filter((k) => config.poller[k]);
+  if (cpiSet.length > 0 && cpiSet.length < cpiKeys.length) {
+    problems.push(`CPI connection is partly configured; also set: ${cpiKeys.filter((k) => !config.poller[k]).join(', ')} (see CPI_* variables).`);
+  }
+  if (config.certificates.criticalDays > config.certificates.warnDays) {
+    problems.push('CERT_CRITICAL_DAYS must not be larger than CERT_WARN_DAYS.');
+  }
   if (config.poller.enabled) {
     for (const key of ['apiUrl', 'tokenUrl', 'clientId', 'clientSecret']) {
       if (!config.poller[key]) problems.push(`CPI poller is enabled but ${key} is missing (see CPI_* variables).`);
@@ -88,4 +101,10 @@ function validateConfig(config) {
   return problems;
 }
 
-module.exports = { loadConfig, validateConfig };
+/** True when all CPI connection settings are present (used by the poller and the certificate view). */
+function cpiConfigured(config) {
+  const p = config.poller;
+  return Boolean(p.apiUrl && p.tokenUrl && p.clientId && p.clientSecret);
+}
+
+module.exports = { loadConfig, validateConfig, cpiConfigured };

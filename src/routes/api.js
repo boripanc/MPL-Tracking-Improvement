@@ -79,7 +79,7 @@ function categoryBody(b) {
 
 /* ---------- router ---------- */
 
-function apiRouter({ pool, config }) {
+function apiRouter({ pool, config, certificates }) {
   const router = express.Router();
   const run = (sql, params) => queryResult(pool, sql, params);
   const handle = (fn) => (req, res, next) => {
@@ -91,7 +91,7 @@ function apiRouter({ pool, config }) {
 
   router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 
-  router.get('/meta', handle(() => run(SQL.meta)));
+  router.get('/meta', handle(async () => ({ ...(await run(SQL.meta)), certificatesEnabled: Boolean(certificates) })));
 
   router.get('/dashboard', handle((req) => run(SQL.dashboard, range(req.query, config))));
 
@@ -183,6 +183,22 @@ function apiRouter({ pool, config }) {
       pattern: text(b.pattern, 'pattern', 4000, { required: true }),
       flow: text(b.flow, 'flow', 300),
     });
+  }));
+
+  // Certificate expiry, read live from the CPI keystore (cached). ?refresh=1 forces a re-read.
+  router.get('/certificates', handle(async (req) => {
+    if (!certificates) {
+      return { enabled: false, reason: 'Set CPI_API_URL, CPI_TOKEN_URL, CPI_CLIENT_ID and CPI_CLIENT_SECRET to show certificates.' };
+    }
+    // Avoid hammering CPI: a forced refresh is ignored if the last read was under 30 seconds ago.
+    const force = req.query.refresh === '1' && Date.now() - certificates.lastFetchedAt() > 30000;
+    try {
+      return { enabled: true, ...(await certificates.get({ force })) };
+    } catch (err) {
+      console.error('[certificates]', err.message);
+      const hint = err.status === 401 || err.status === 403 ? ' Check that the CPI service key may read the keystore.' : '';
+      throw new HttpError(502, `Could not read certificates from CPI: ${err.message}.${hint}`);
+    }
   }));
 
   router.use((req, res) => res.status(404).json({ error: 'Not found' }));

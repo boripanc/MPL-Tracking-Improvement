@@ -47,15 +47,28 @@ function fail(e) { toast((e && e.message) || String(e), true); }
 function show(tab) {
   S.tab = tab;
   $$('#tabs button').forEach(function (b) { b.classList.toggle('on', b.dataset.t === tab); });
-  ['dash', 'errors', 'known', 'cats'].forEach(function (t) { $('#v-' + t).hidden = t !== tab; });
+  ['dash', 'errors', 'known', 'cats', 'certs'].forEach(function (t) { $('#v-' + t).hidden = t !== tab; });
+  $('#range').hidden = tab === 'certs'; // certificates do not depend on the period
   window.scrollTo(0, 0);
   return load();
 }
-function load() { var f = { dash: loadDash, errors: loadErrors, known: loadKnown, cats: loadCats }[S.tab]; return f().catch(fail); }
+function load() { var f = { dash: loadDash, errors: loadErrors, known: loadKnown, cats: loadCats, certs: loadCerts }[S.tab]; return f().catch(fail); }
 function loadMeta() {
-  return get('api/meta').then(function (m) { S.meta = m; $('#polled').textContent = m.lastPolled ? 'Data polled ' + dt(m.lastPolled) : ''; });
+  return get('api/meta').then(function (m) {
+    S.meta = m;
+    $('#polled').textContent = m.lastPolled ? 'Data polled ' + dt(m.lastPolled) : '';
+    $('#tabs button[data-t="certs"]').hidden = false;
+    if (m.certificatesEnabled && !S.cache.certs) {
+      // Fill the menu badge in the background; failures are shown on the Certificates screen itself.
+      get('api/certificates').then(function (d) { S.cache.certs = d; setCertBadge(d.summary); }).catch(function () {});
+    }
+  });
 }
-function refreshAll() { S.cache.known = null; return loadMeta().then(load).catch(fail); }
+function refreshAll() {
+  S.cache.known = null;
+  if (S.tab === 'certs') return loadCerts(true).catch(fail);
+  return loadMeta().then(load).catch(fail);
+}
 
 /* ---------- Dashboard ---------- */
 function kpi(l, v, s, cls) { return '<div class="card kpi ' + (cls || '') + '"><div class="l">' + esc(l) + '</div><div class="v">' + v + '</div><div class="s">' + esc(s || '') + '</div></div>'; }
@@ -397,6 +410,128 @@ function openCategory(c) {
     if (!confirm('Delete category "' + c.category_name + '"?')) return;
     request('DELETE', 'api/categories/' + c.error_id).then(function () { toast('Deleted'); closeDrawer(); refreshAll(); }).catch(fail);
   };
+}
+
+/* ---------- Certificates ---------- */
+var CERT_STATES = { expired: 'Expired', critical: 'Expires soon', warning: 'Expiring', ok: 'Valid', unknown: 'No end date' };
+S.cf = { state: '', type: '', hideSap: false, q: '' };
+
+function certPill(c) { return '<span class="pill cert-' + esc(c.state) + '">' + esc(CERT_STATES[c.state] || c.state) + '</span>'; }
+function daysText(c) {
+  if (c.daysLeft == null) return '–';
+  if (c.state === 'expired') return c.daysLeft === 0 ? 'expired today' : 'expired ' + fmt(-c.daysLeft) + ' d ago';
+  return fmt(c.daysLeft) + ' d';
+}
+function dateOnly(s) { return s ? new Date(s).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' }) : '–'; }
+function setCertBadge(sum) {
+  var b = $('#cert-badge'), n = sum ? sum.expired + sum.critical : 0;
+  b.textContent = n > 99 ? '99+' : String(n);
+  b.hidden = !n;
+}
+function certsShell() {
+  return '<div class="grid kpis" id="cert-kpis"></div>' +
+    '<div class="filters mt"><select id="cf-state" aria-label="Status"></select><select id="cf-type" aria-label="Type"></select>' +
+    '<label class="check"><input type="checkbox" id="cf-sap"> Hide SAP-owned</label>' +
+    '<input id="cf-q" type="search" placeholder="Search alias, subject, issuer or serial number" style="min-width:240px;flex:1">' +
+    '<button class="btn" id="cf-refresh">Re-read from CPI</button><button class="btn" id="cf-csv">Export CSV</button></div>' +
+    '<div class="card"><div class="row" style="margin-bottom:8px"><b id="cert-count"></b><span class="sp"></span><span class="muted small" id="cert-fetched"></span></div><div class="scroll" id="cert-tab"></div></div>' +
+    '<p class="muted small" id="cert-note"></p>';
+}
+function bindCerts() {
+  $('#cf-state').onchange = function () { S.cf.state = this.value; renderCerts(); };
+  $('#cf-type').onchange = function () { S.cf.type = this.value; renderCerts(); };
+  $('#cf-sap').onchange = function () { S.cf.hideSap = this.checked; renderCerts(); };
+  $('#cf-q').oninput = function () { S.cf.q = this.value.trim().toLowerCase(); renderCerts(); };
+  $('#cf-refresh').onclick = function () { loadCerts(true).catch(fail); };
+  $('#cf-csv').onclick = exportCertCsv;
+}
+function loadCerts(force) {
+  var v = $('#v-certs');
+  if (!$('#cert-tab', v)) { v.innerHTML = certsShell(); bindCerts(); }
+  $('#cert-tab').innerHTML = '<div class="empty">' + (force ? 'Reading the keystore from CPI…' : 'Loading…') + '</div>';
+  return get('api/certificates', force ? { refresh: 1 } : {}).then(function (d) {
+    S.cache.certs = d;
+    if (!d.enabled) {
+      v.innerHTML = '<div class="card"><h2>Certificate monitoring is not set up</h2><p class="muted">' + esc(d.reason) + '</p></div>';
+      return;
+    }
+    setCertBadge(d.summary);
+    renderCerts();
+    if (force) toast('Certificates re-read from CPI');
+  }, function (e) {
+    $('#cert-tab').innerHTML = '<div class="empty bad">' + esc(e.message) + '</div>';
+    throw e;
+  });
+}
+function certMatches(c, f) {
+  if (f.state === 'attention' && ['expired', 'critical', 'warning'].indexOf(c.state) < 0) return false;
+  if (f.state && f.state !== 'attention' && c.state !== f.state) return false;
+  if (f.type && c.entryType !== f.type) return false;
+  if (f.hideSap && /^sap$/i.test(c.owner)) return false;
+  if (f.q && [c.alias, c.subjectDN, c.issuerDN, c.serialNumber].join(' ').toLowerCase().indexOf(f.q) < 0) return false;
+  return true;
+}
+function certKpi(state, label, value, sub, cls) {
+  return '<div class="card kpi click ' + (cls || '') + (S.cf.state === state ? ' sel' : '') + '" data-st="' + state + '" role="button" tabindex="0">' +
+    '<div class="l">' + esc(label) + '</div><div class="v">' + fmt(value) + '</div><div class="s">' + esc(sub) + '</div></div>';
+}
+function renderCerts() {
+  var d = S.cache.certs, f = S.cf, sum = d.summary;
+  $('#cert-kpis').innerHTML =
+    certKpi('expired', 'Expired', sum.expired, 'renew or remove now', sum.expired ? 'alert' : '') +
+    certKpi('critical', 'Expires within ' + d.criticalDays + ' days', sum.critical, 'plan the renewal', sum.critical ? 'alert' : '') +
+    certKpi('warning', 'Expires within ' + d.warnDays + ' days', sum.warning, 'coming up', sum.warning ? 'warn' : '') +
+    certKpi('ok', 'Valid', sum.ok, 'more than ' + d.warnDays + ' days left', 'good') +
+    certKpi('', 'All entries', sum.total, 'in the tenant keystore', '');
+  $$('#cert-kpis [data-st]').forEach(function (el) {
+    var pick = function () { S.cf.state = S.cf.state === el.dataset.st ? '' : el.dataset.st; renderCerts(); };
+    el.onclick = pick;
+    el.onkeydown = function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } };
+  });
+  var types = [];
+  d.items.forEach(function (c) { if (c.entryType && types.indexOf(c.entryType) < 0) types.push(c.entryType); });
+  $('#cf-state').innerHTML = opts([['', 'All statuses'], ['attention', 'Needs attention (expired or expiring)'], ['expired', 'Expired'], ['critical', 'Expires within ' + d.criticalDays + ' days'], ['warning', 'Expires within ' + d.warnDays + ' days'], ['ok', 'Valid']], f.state);
+  $('#cf-type').innerHTML = opts([['', 'All types']].concat(types.sort().map(function (t) { return [t, t]; })), f.type);
+  $('#cf-sap').checked = f.hideSap;
+  $('#cert-fetched').textContent = 'Read from CPI ' + dt(d.fetchedAt);
+  $('#cert-note').textContent = 'Expires soon = less than ' + d.criticalDays + ' days left; Expiring = less than ' + d.warnDays + ' days (CERT_CRITICAL_DAYS / CERT_WARN_DAYS). The keystore is re-read at most every few minutes; use "Re-read from CPI" after renewing a certificate.';
+  var rows = d.items.filter(function (c) { return certMatches(c, f); });
+  S.cache.certRows = rows;
+  $('#cert-count').textContent = fmt(rows.length) + ' of ' + fmt(d.items.length) + ' entries';
+  if (!rows.length) { $('#cert-tab').innerHTML = '<div class="empty">No certificates match these filters.</div>'; return; }
+  $('#cert-tab').innerHTML = '<table><thead><tr><th>Status</th><th>Alias</th><th>Type</th><th>Subject</th><th>Issuer</th><th>Valid until</th><th class="num">Days left</th><th>Owner</th></tr></thead><tbody>' +
+    rows.map(function (c, i) {
+      return '<tr class="click" data-i="' + i + '"><td>' + certPill(c) + '</td><td><b>' + esc(c.alias) + '</b></td>' +
+        '<td class="small">' + esc(c.entryType) + (c.keyType ? '<div class="muted">' + esc(c.keyType + (c.keySize ? ' ' + c.keySize : '')) + '</div>' : '') + '</td>' +
+        '<td>' + esc(c.subject) + '</td><td class="small">' + esc(c.issuer) + '</td><td class="nowrap">' + dateOnly(c.validTo) + '</td>' +
+        '<td class="num nowrap' + (c.state === 'expired' || c.state === 'critical' ? ' bad' : '') + '">' + daysText(c) + '</td><td class="small">' + esc(c.owner) + '</td></tr>';
+    }).join('') + '</tbody></table>';
+  $$('#cert-tab tr[data-i]').forEach(function (t) { t.onclick = function () { openCert(rows[+t.dataset.i]); }; });
+}
+function openCert(c) {
+  openDrawer(drawerHead('Certificate: ' + c.alias) +
+    '<div class="row" style="margin-bottom:12px">' + certPill(c) + '<span class="muted">' + esc(daysText(c)) + '</span></div>' +
+    '<div class="kv">' +
+      kv('Alias', '<b>' + esc(c.alias) + '</b>') + kv('Entry type', esc(c.entryType)) +
+      kv('Key', esc([c.keyType, c.keySize].filter(Boolean).join(' '))) + kv('Owner', esc(c.owner)) +
+      kv('Valid from', esc(dtFull(c.validFrom))) + kv('Valid until', '<b>' + esc(dtFull(c.validTo)) + '</b>') +
+      kv('Subject', '<span class="mono">' + esc(c.subjectDN) + '</span>') + kv('Issuer', '<span class="mono">' + esc(c.issuerDN) + '</span>') +
+      kv('Serial number', '<span class="mono">' + esc(c.serialNumber) + '</span>') + kv('Signature algorithm', esc(c.signatureAlgorithm)) +
+      kv('Fingerprint', '<span class="mono">' + esc(c.fingerprintSha256) + '</span>') +
+      kv('Last changed', esc([dtFull(c.lastModifiedTime), c.lastModifiedBy].filter(Boolean).join(' by '))) +
+    '</div>' +
+    '<p class="muted small" style="margin-top:20px">Renew the entry in Integration Suite under Monitor → Integrations and APIs → Manage Security → Keystore, then press "Re-read from CPI".</p>');
+}
+function exportCertCsv() {
+  var rows = S.cache.certRows || [];
+  var cols = ['state', 'alias', 'entryType', 'keyType', 'keySize', 'owner', 'subjectDN', 'issuerDN', 'serialNumber', 'validFrom', 'validTo', 'daysLeft'];
+  var q = function (v) { v = v == null ? '' : String(v); return '"' + v.split('"').join('""') + '"'; };
+  var csv = cols.join(',') + NL + rows.map(function (r) { return cols.map(function (c) { return q(r[c]); }).join(','); }).join(NL);
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download = 'cpi-certificates.csv';
+  a.click();
+  toast('Exported ' + rows.length + ' certificates');
 }
 
 /* ---------- Start ---------- */

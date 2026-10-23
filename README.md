@@ -16,6 +16,7 @@ existing `errorscenario` view, so the app and the view always agree.
 | **Errors** | Filter by iFlow, status, category, analysis status and free text; page through results; export CSV. Clicking an error shows the full error text, category, root cause and solution, custom header properties, other messages with the same correlation ID, and a link to the CPI monitor. |
 | **Known errors & solutions** | Create / edit / delete entries in `error_analyzed`, set status (Open, In Progress, Monitoring, Resolved), add comments. A status change automatically adds a comment such as "Status changed from Open to Resolved by alice". |
 | **Categories** | Create / edit / delete rules in `error_category`, optionally limited to one iFlow, and see how many errors each rule catches. |
+| **Certificates** | Certificates and key pairs in the CPI tenant keystore with their expiry date and days left: **Expired**, **Expires soon** (< 30 days), **Expiring** (< 90 days) or **Valid**. Filter by status or type, hide SAP-owned entries, search, open the full details (subject, issuer, serial, fingerprint) and export CSV. The menu shows a red badge with the number of expired and soon-expiring entries. |
 
 Both editors have a **Test against last 30 days** button that shows how many errors a pattern would match before you save it.
 
@@ -81,6 +82,21 @@ All settings are environment variables (a `.env` file is read automatically). Se
 
 The server will not start without `DATABASE_URL`, or without `APP_USERS` unless `AUTH_DISABLED=true`.
 
+## Certificate expiry
+
+The **Certificates** menu reads the tenant keystore live from the CPI OData API (`KeystoreEntries`), so it needs the
+same CPI connection settings as the poller (`CPI_API_URL`, `CPI_TOKEN_URL`, `CPI_CLIENT_ID`, `CPI_CLIENT_SECRET`).
+The poller itself does not have to be enabled. Without these settings the menu explains what to configure.
+
+The service key's client must be allowed to read the keystore; if it is not, the screen shows the HTTP 401/403 error
+from CPI. Nothing is stored in the database.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `CERT_CRITICAL_DAYS` | `30` | Fewer days left than this → **Expires soon** (red, counted in the menu badge). |
+| `CERT_WARN_DAYS` | `90` | Fewer days left than this → **Expiring** (amber). |
+| `CERT_CACHE_MINUTES` | `15` | How long the keystore is cached. **Re-read from CPI** forces a new read (at most every 30 seconds). |
+
 ## Optional: pull errors from CPI directly
 
 The app can replace the n8n workflow that copies CPI error MPLs into the database. It does the same thing:
@@ -142,6 +158,7 @@ All endpoints are under `/api`, require login and return JSON. Errors return `{ 
 | `PUT /api/categories/:id` | Update (same body) |
 | `DELETE /api/categories/:id` | Delete |
 | `POST /api/test-match` | `{ kind: "like" \| "regex", pattern, flow }` → matches in the last 30 days |
+| `GET /api/certificates` | Keystore entries with `state` (expired / critical / warning / ok / unknown), `daysLeft` and a summary. `?refresh=1` re-reads CPI |
 | `GET /healthz` | Database check (no login) |
 
 ## Development
@@ -165,6 +182,8 @@ src/
   sql.js             all SQL queries (matching rules live here)
   routes/api.js      REST API and input validation
   middleware/        Basic auth, error handling
+  cpi/client.js      CPI OData API client (OAuth2 client credentials)
+  cpi/certificates.js keystore read + expiry classification (Certificates menu)
   poller/cpi.js      optional CPI MPL poller
   scripts/           db:init / db:seed, one-off poll
 public/              the web page (index.html, app.js, styles.css)
