@@ -48,7 +48,7 @@ function show(tab) {
   S.tab = tab;
   $$('#tabs button').forEach(function (b) { b.classList.toggle('on', b.dataset.t === tab); });
   ['dash', 'errors', 'known', 'cats', 'tickets', 'certs'].forEach(function (t) { $('#v-' + t).hidden = t !== tab; });
-  $('#range').hidden = tab === 'certs'; // certificates do not depend on the period
+  syncRangeVisibility();
   window.scrollTo(0, 0);
   return load();
 }
@@ -581,6 +581,35 @@ function exportCertCsv() {
 
 /* ---------- Ticket pulse ---------- */
 S.tf = { view: 'all', grp: '', responder: '', q: '' };
+// Ticket pulse time view: 'day' follows the period picker; week / month / year show the last 12 weeks, 12 months or 5 years.
+S.tp = 'day';
+try { S.tp = localStorage.getItem('cpiec-tkview') || 'day'; } catch (e) {}
+var TP = {
+  day: { label: 'Daily', span: 'in the selected period', cur: '', prev: '' },
+  week: { label: 'Weekly', span: 'in the last 12 weeks', cur: 'This week', prev: 'last week' },
+  month: { label: 'Monthly', span: 'in the last 12 months', cur: 'This month', prev: 'last month' },
+  year: { label: 'Yearly', span: 'in the last 5 years', cur: 'This year', prev: 'last year' }
+};
+if (!TP[S.tp]) S.tp = 'day';
+function syncRangeVisibility() {
+  // Certificates do not depend on the period; Ticket pulse only uses it in the daily view.
+  $('#range').hidden = S.tab === 'certs' || (S.tab === 'tickets' && S.tp !== 'day');
+}
+function setTicketView(tp) {
+  S.tp = tp;
+  try { localStorage.setItem('cpiec-tkview', tp); } catch (e) {}
+  syncRangeVisibility();
+  return loadTickets().catch(fail);
+}
+var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function bucketLabel(x, unit) {
+  var dd = x.slice(8, 10) + '/' + x.slice(5, 7);
+  if (unit === 'hour') return dd + ' ' + x.slice(11, 16);
+  if (unit === 'week') return 'Wk ' + dd;
+  if (unit === 'month') return MONTHS[+x.slice(5, 7) - 1] + ' ' + x.slice(2, 4);
+  if (unit === 'year') return x.slice(0, 4);
+  return dd;
+}
 var TK_VIEWS = { all: 'All open', overdue: 'Overdue', soon: 'Due soon', unassigned: 'Unassigned' };
 
 function setTicketBadge(d) {
@@ -625,18 +654,22 @@ function countTable(rows, key, empty, cols) {
 function loadTickets() {
   var v = $('#v-tickets');
   if (!v.innerHTML) v.innerHTML = '<div class="empty">Loading…</div>';
-  return get('api/tickets/pulse', withRange()).then(function (d) {
+  return get('api/tickets/pulse', withRange({ view: S.tp })).then(function (d) {
     setTicketBadge(d);
     if (!d.enabled) {
       v.innerHTML = '<div class="card"><h2>Ticket pulse is not available yet</h2><p class="muted">' + esc(d.reason) + '</p></div>';
       return;
     }
     S.cache.tickets = d;
+    var span = TP[S.tp].span;
     v.innerHTML =
+      '<div class="filters"><span class="muted small">View</span><div class="seg" role="group" aria-label="View">' +
+        Object.keys(TP).map(function (x) { return '<button class="btn' + (x === S.tp ? ' on' : '') + '" data-tp="' + x + '" aria-pressed="' + (x === S.tp) + '">' + TP[x].label + '</button>'; }).join('') +
+      '</div><span class="muted small">' + esc(S.tp === 'day' ? 'Uses the period picker at the top.' : 'Created, resolved and first response ' + span + '.') + '</span></div>' +
       (d.stale ? '<div class="card" style="margin-bottom:16px"><b class="bad">The ticket data may be out of date:</b> <span class="muted">the newest ticket change is from ' + esc(d.lastChange ? dt(d.lastChange) : 'never') + ', more than ' + d.staleHours + ' hours ago. Run the n8n workflow "FreshServices Tickets" (and check its Freshservice cookie) to refresh it.</span></div>' : '') +
       '<div class="grid kpis" id="tk-kpis"></div>' +
       '<div class="grid two mt">' +
-        '<div class="card"><h2>Created vs. resolved <small>in the selected period</small></h2><div class="ch"><canvas id="c-tk-flow"></canvas></div></div>' +
+        '<div class="card"><h2>Created vs. resolved <small>' + esc(span) + '</small></h2><div class="ch"><canvas id="c-tk-flow"></canvas></div></div>' +
         '<div class="card"><h2>Open backlog by age <small>since the ticket was created</small></h2><div class="ch"><canvas id="c-tk-age"></canvas></div></div>' +
       '</div>' +
       '<div class="grid half mt">' +
@@ -646,7 +679,7 @@ function loadTickets() {
       '<div class="grid half mt">' +
         '<div class="card"><h2>Open by status</h2><div class="scroll">' + countTable(d.byStatus, 'ts', 'No open tickets.', ['Status']) +
           (d.byPending.length ? '<h3>Pending reasons</h3>' + countTable(d.byPending, 'tp', '', ['Reason']) : '') + '</div></div>' +
-        '<div class="card"><h2>Top sub-categories <small>tickets created in the period</small></h2><div class="scroll">' + countTable(d.bySubCategory, 'tc', 'No tickets created in this period.', ['Sub-category']).replace('<th class="num">Open</th>', '<th class="num">Created</th>') + '</div></div>' +
+        '<div class="card"><h2>Top sub-categories <small>tickets created ' + esc(span) + '</small></h2><div class="scroll">' + countTable(d.bySubCategory, 'tc', 'No tickets created in this period.', ['Sub-category']).replace('<th class="num">Open</th>', '<th class="num">Created</th>') + '</div></div>' +
       '</div>' +
       '<div class="filters mt"><select id="tf-view" aria-label="Show"></select><select id="tf-grp" aria-label="Group"></select><select id="tf-resp" aria-label="Responder"></select>' +
         '<input id="tf-q" type="search" placeholder="Search ticket, subject, requester or entity" style="min-width:240px;flex:1">' +
@@ -654,6 +687,7 @@ function loadTickets() {
       '<div class="card"><div class="row" style="margin-bottom:8px"><b id="tk-count"></b><span class="sp"></span><span class="muted small">Newest ticket change ' + esc(dt(d.lastChange)) + '</span></div><div class="scroll" id="tk-tab"></div></div>' +
       '<p class="muted small">Freshservice tickets from the database table the n8n workflow "FreshServices Tickets" fills. Open = any status except Resolved and Closed. Tickets tagged noncharge and changes (Standard, Normal, Emergency) are left out. Due soon = due within ' + d.dueSoonHours + ' hours (TICKETS_DUE_SOON_HOURS).</p>';
     $('#tf-q').value = S.tf.q;
+    $$('#v-tickets [data-tp]').forEach(function (b) { b.onclick = function () { if (b.dataset.tp !== S.tp) setTicketView(b.dataset.tp); }; });
     $('#tf-view').onchange = function () { S.tf.view = this.value; renderTickets(); };
     $('#tf-grp').onchange = function () { S.tf.grp = this.value; renderTickets(); };
     $('#tf-resp').onchange = function () { S.tf.responder = this.value; renderTickets(); };
@@ -676,8 +710,8 @@ function renderTickets() {
     tkKpi('overdue', 'Overdue', fmt(k.overdue), 'past the due date', k.overdue ? 'alert' : 'good') +
     tkKpi('soon', 'Due soon', fmt(k.dueSoon), 'due within ' + d.dueSoonHours + ' hours', k.dueSoon ? 'warn' : '') +
     tkKpi('unassigned', 'Unassigned', fmt(k.unassigned), 'open, no responder', k.unassigned ? 'warn' : '') +
-    tkKpi('', 'Created', fmt(k.created), 'in period · ' + fmt(k.resolved) + ' resolved (' + (net > 0 ? '+' : '') + fmt(net) + ' net)', '') +
-    tkKpi('', 'First response', k.frtMedianH == null ? '–' : k.frtMedianH + ' h', 'median, tickets created in period', '');
+    createdKpi(d) +
+    tkKpi('', 'First response', k.frtMedianH == null ? '–' : k.frtMedianH + ' h', 'median, tickets created ' + TP[S.tp].span, '');
   $$('#tk-kpis [data-tv]').forEach(function (el) {
     var go = function () { S.tf.view = el.dataset.tv; renderTickets(); };
     el.onclick = go;
@@ -702,13 +736,21 @@ function renderTickets() {
     }).join('') + '</tbody></table>';
   $$('#tk-tab tr[data-i]').forEach(function (t) { t.onclick = function (e) { if (e.target.closest('[data-ext]')) return; openTicket(rows[+t.dataset.i].id); }; });
 }
+function createdKpi(d) {
+  var k = d.kpi, net = k.created - k.resolved, tp = TP[S.tp];
+  if (S.tp === 'day' || !d.series.length) {
+    return tkKpi('', 'Created', fmt(k.created), 'in period · ' + fmt(k.resolved) + ' resolved (' + (net > 0 ? '+' : '') + fmt(net) + ' net)', '');
+  }
+  var cur = d.series[d.series.length - 1], prev = d.series[d.series.length - 2];
+  return tkKpi('', tp.cur + ': created', fmt(cur.created), fmt(cur.resolved) + ' resolved' + (prev ? ' · ' + tp.prev + ' ' + fmt(prev.created) + ' created, ' + fmt(prev.resolved) + ' resolved' : ''), '');
+}
 function drawTickets(d) {
   if (!window.Chart) return;
   var grid = css('--line');
   Chart.defaults.color = css('--muted');
   Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
   var unit = d.range.unit;
-  var labels = d.series.map(function (p) { var x = p.bucket, dd = x.slice(8, 10) + '/' + x.slice(5, 7); return unit === 'hour' ? dd + ' ' + x.slice(11, 16) : dd; });
+  var labels = d.series.map(function (p) { return bucketLabel(p.bucket, unit); });
   chart('c-tk-flow', {
     type: 'bar',
     data: { labels: labels, datasets: [

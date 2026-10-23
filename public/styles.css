@@ -92,3 +92,8 @@ label.f{display:block;margin:12px 0 4px;color:var(--muted);font-size:12.5px}
 .kpi.good .v{color:var(--ok)}
 label.check{display:inline-flex;gap:6px;align-items:center;font-size:13px;color:var(--muted)}
 .pill.tk{background:var(--accent-weak);color:var(--accent)}
+.seg{display:inline-flex}
+.seg .btn{border-radius:0;margin-left:-1px}
+.seg .btn:first-child{border-radius:6px 0 0 6px;margin-left:0}
+.seg .btn:last-child{border-radius:0 6px 6px 0}
+.seg .btn.on{background:var(--accent-weak);color:var(--accent);border-color:var(--accent);position:relative;z-index:1;font-weight:600}
