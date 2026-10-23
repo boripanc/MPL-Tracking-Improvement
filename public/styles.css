@@ -97,3 +97,10 @@ label.check{display:inline-flex;gap:6px;align-items:center;font-size:13px;color:
 .seg .btn:first-child{border-radius:6px 0 0 6px;margin-left:0}
 .seg .btn:last-child{border-radius:0 6px 6px 0}
 .seg .btn.on{background:var(--accent-weak);color:var(--accent);border-color:var(--accent);position:relative;z-index:1;font-weight:600}
+.rich{overflow-wrap:anywhere}
+.rich p{margin:0 0 8px}
+.rich>:last-child{margin-bottom:0}
+.rich table{width:auto;margin:6px 0}
+.rich td,.rich th{border:1px solid var(--line);padding:4px 6px}
+.rich h1,.rich h2,.rich h3,.rich h4{font-size:14px;margin:10px 0 6px;color:var(--text);text-transform:none;letter-spacing:0}
+.rich pre{white-space:pre-wrap}

@@ -784,8 +784,37 @@ function openTicket(id) {
         kv('Tags', esc(t.tags)) +
       '</div>' +
       (t.last_comment_at ? '<h3>Last comment</h3><div class="box"><div class="muted small">' + esc(dtFull(t.last_comment_at)) + ' · ' + esc([t.last_comment_by, t.last_comment_type].filter(Boolean).join(' · ')) + '</div><div class="txt" style="margin-top:6px">' + esc(t.last_comment_text || '') + '</div></div>' : '') +
-      (t.details ? '<h3>Description</h3><div class="txt box">' + esc(t.details) + '</div>' : ''));
+      (t.details ? '<h3>Description</h3><div class="box rich" id="tk-desc"></div>' : ''));
+    if (t.details) $('#tk-desc').appendChild(safeHtml(t.details));
   }).catch(function (e) { openDrawer(drawerHead('Ticket ' + id) + '<div class="empty bad">' + esc(e.message) + '</div>'); });
+}
+// Freshservice descriptions are HTML. Keep only formatting tags and safe links; drop scripts, styles, event
+// handlers and images (the page's security policy blocks outside images anyway).
+var SAFE_TAGS = ['P', 'BR', 'DIV', 'SPAN', 'B', 'STRONG', 'I', 'EM', 'U', 'S', 'STRIKE', 'SUB', 'SUP', 'UL', 'OL', 'LI',
+  'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'TH', 'TD', 'CAPTION', 'A', 'PRE', 'CODE', 'BLOCKQUOTE',
+  'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HR', 'FONT', 'SMALL', 'BIG', 'DL', 'DT', 'DD'];
+var DROP_TAGS = ['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'FORM', 'INPUT', 'BUTTON', 'TEXTAREA', 'SELECT', 'SVG', 'MATH', 'LINK', 'META', 'BASE', 'TEMPLATE', 'NOSCRIPT', 'HEAD', 'TITLE'];
+function safeHtml(html) {
+  var doc = new DOMParser().parseFromString('<body>' + String(html) + '</body>', 'text/html');
+  var out = document.createDocumentFragment();
+  function copy(src, dst) {
+    Array.prototype.forEach.call(src.childNodes, function (n) {
+      if (n.nodeType === 3) { dst.appendChild(document.createTextNode(n.nodeValue)); return; }
+      if (n.nodeType !== 1 || DROP_TAGS.indexOf(n.tagName) >= 0) return;
+      if (n.tagName === 'IMG') { dst.appendChild(document.createTextNode(n.getAttribute('alt') ? '[image: ' + n.getAttribute('alt') + ']' : '[image]')); return; }
+      if (SAFE_TAGS.indexOf(n.tagName) < 0) { copy(n, dst); return; } // unknown tag: keep its text
+      var el = document.createElement(n.tagName === 'FONT' ? 'span' : n.tagName.toLowerCase());
+      if (n.tagName === 'A') {
+        var href = (n.getAttribute('href') || '').trim();
+        if (/^(https?:|mailto:)/i.test(href)) { el.setAttribute('href', href); el.setAttribute('target', '_blank'); el.setAttribute('rel', 'noopener noreferrer'); }
+      }
+      ['colspan', 'rowspan'].forEach(function (a) { var v = n.getAttribute(a); if (v && /^[0-9]{1,3}$/.test(v)) el.setAttribute(a, v); });
+      copy(n, el);
+      dst.appendChild(el);
+    });
+  }
+  copy(doc.body, out);
+  return out;
 }
 function exportTicketCsv() {
   var rows = S.cache.ticketRows || [];
