@@ -19,6 +19,7 @@ const COLUMNS = {
   type: { col: 'type', type: 'text' },
   category: { col: 'category', type: 'text' },
   sub_category: { col: 'sub_category', type: 'text' },
+  item: { col: 'item_category', type: 'text' },
   pending_reason: { col: 'pending_reason', type: 'text' },
   grp: { col: 'group', type: 'text' },
   responder: { col: 'responder', type: 'text' },
@@ -174,7 +175,7 @@ SELECT json_build_object(
   'bySubCategory', (SELECT COALESCE(json_agg(x ORDER BY x.n DESC, x.name), '[]') FROM (
       SELECT COALESCE(sub_category, category, '(none)') AS name, count(*) AS n FROM created GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 10) x),
   'open', (SELECT COALESCE(json_agg(x), '[]') FROM (
-      SELECT id, subject, type, status, pending_reason, grp, responder, requester, entity, sub_category,
+      SELECT id, subject, type, status, pending_reason, grp, responder, requester, entity, category, sub_category, item,
              created_at, updated_at, due_by, last_comment_at, last_comment_by, last_comment_type
       FROM o
       ORDER BY (due_by < now()) DESC NULLS LAST, due_by NULLS LAST, created_at

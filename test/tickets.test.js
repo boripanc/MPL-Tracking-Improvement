@@ -142,3 +142,12 @@ test('weekly, monthly and yearly views group the trend by week, month and year',
   assert.equal((await api.call('GET', '/api/tickets/pulse?view=quarter')).status, 400);
   assert.equal((await api.call('GET', '/api/tickets/pulse?view=day')).body.range.unit, 'day');
 });
+
+test('open list and detail include category, sub-category and item', async () => {
+  await db.pool.query(`UPDATE tickets SET category = 'Integration', item_category = 'AS2' WHERE human_display_id = 'INC-102'`);
+  const d = (await api.call('GET', '/api/tickets/pulse')).body;
+  const t = d.open.find((x) => x.id === 'INC-102');
+  assert.deepEqual([t.category, t.sub_category, t.item], ['Integration', 'EDI', 'AS2']);
+  const detail = (await api.call('GET', '/api/tickets/INC-102')).body;
+  assert.deepEqual([detail.category, detail.sub_category, detail.item], ['Integration', 'EDI', 'AS2']);
+});

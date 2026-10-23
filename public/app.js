@@ -635,7 +635,7 @@ function tkMatches(t, f, soonHours) {
   if (f.view === 'unassigned' && t.responder) return false;
   if (f.grp && (t.grp || '(none)') !== f.grp) return false;
   if (f.responder && (t.responder || '(unassigned)') !== f.responder) return false;
-  if (f.q && [t.id, t.subject, t.requester, t.entity, t.sub_category, t.status, t.pending_reason].join(' ').toLowerCase().indexOf(f.q) < 0) return false;
+  if (f.q && [t.id, t.subject, t.requester, t.entity, t.category, t.sub_category, t.item, t.status, t.pending_reason].join(' ').toLowerCase().indexOf(f.q) < 0) return false;
   return true;
 }
 function tkKpi(view, label, value, sub, cls) {
@@ -682,7 +682,7 @@ function loadTickets() {
         '<div class="card"><h2>Top sub-categories <small>tickets created ' + esc(span) + '</small></h2><div class="scroll">' + countTable(d.bySubCategory, 'tc', 'No tickets created in this period.', ['Sub-category']).replace('<th class="num">Open</th>', '<th class="num">Created</th>') + '</div></div>' +
       '</div>' +
       '<div class="filters mt"><select id="tf-view" aria-label="Show"></select><select id="tf-grp" aria-label="Group"></select><select id="tf-resp" aria-label="Responder"></select>' +
-        '<input id="tf-q" type="search" placeholder="Search ticket, subject, requester or entity" style="min-width:240px;flex:1">' +
+        '<input id="tf-q" type="search" placeholder="Search ticket, subject, category, requester or entity" style="min-width:240px;flex:1">' +
         '<button class="btn" id="tf-clear">Clear filters</button><button class="btn" id="tf-csv">Export CSV</button></div>' +
       '<div class="card"><div class="row" style="margin-bottom:8px"><b id="tk-count"></b><span class="sp"></span><span class="muted small">Newest ticket change ' + esc(dt(d.lastChange)) + '</span></div><div class="scroll" id="tk-tab"></div></div>' +
       '<p class="muted small">Freshservice tickets from the database table the n8n workflow "FreshServices Tickets" fills. Open = any status except Resolved and Closed. Tickets tagged noncharge and changes (Standard, Normal, Emergency) are left out. Due soon = due within ' + d.dueSoonHours + ' hours (TICKETS_DUE_SOON_HOURS).</p>';
@@ -725,10 +725,11 @@ function renderTickets() {
   S.cache.ticketRows = rows;
   $('#tk-count').textContent = fmt(rows.length) + ' of ' + fmt(k.open) + ' open tickets' + (d.open.length < k.open ? ' (list shows the first ' + fmt(d.open.length) + ')' : '');
   if (!rows.length) { $('#tk-tab').innerHTML = '<div class="empty">No open tickets match these filters.</div>'; return; }
-  $('#tk-tab').innerHTML = '<table><thead><tr><th>Ticket</th><th>Subject</th><th>Status</th><th>Group</th><th>Responder</th><th class="num">Age</th><th>Due</th><th>Last comment</th></tr></thead><tbody>' +
+  $('#tk-tab').innerHTML = '<table><thead><tr><th>Ticket</th><th>Subject</th><th>Category</th><th>Sub-category</th><th>Item</th><th>Status</th><th>Group</th><th>Responder</th><th class="num">Age</th><th>Due</th><th>Last comment</th></tr></thead><tbody>' +
     rows.map(function (t, i) {
       return '<tr class="click" data-i="' + i + '"><td class="nowrap"><b>' + (t.link ? '<a href="' + esc(t.link) + '" target="_blank" rel="noopener" title="Open in Freshservice" data-ext>' + esc(t.id) + ' ↗</a>' : esc(t.id)) + '</b>' + (t.type ? '<div class="muted small">' + esc(t.type) + '</div>' : '') + '</td>' +
         '<td>' + esc(short(t.subject, 120)) + (t.requester || t.entity ? '<div class="muted small">' + esc([t.requester, t.entity].filter(Boolean).join(' · ')) + '</div>' : '') + '</td>' +
+        '<td class="small">' + esc(t.category || '') + '</td><td class="small">' + esc(t.sub_category || '') + '</td><td class="small">' + esc(t.item || '') + '</td>' +
         '<td>' + pill(t.status, 'tk') + (t.pending_reason ? '<div class="muted small">' + esc(t.pending_reason) + '</div>' : '') + '</td>' +
         '<td class="small">' + esc(t.grp || '') + '</td><td class="small">' + (t.responder ? esc(t.responder) : '<span class="bad">Unassigned</span>') + '</td>' +
         '<td class="num nowrap">' + ageText(t.created_at) + '</td><td class="nowrap">' + dueText(t.due_by) + '</td>' +
@@ -775,7 +776,7 @@ function openTicket(id) {
       '<div class="kv">' +
         kv('Type', esc(t.type)) + kv('Group', esc(t.grp)) + kv('Responder', t.responder ? esc(t.responder) : '<span class="bad">Unassigned</span>') +
         kv('Requester', esc(t.requester)) + kv('Impacted entity', esc(t.entity)) +
-        kv('Category', esc([t.category, t.sub_category].filter(Boolean).join(' / '))) +
+        kv('Category', esc(t.category)) + kv('Sub-category', esc(t.sub_category)) + kv('Item', esc(t.item)) +
         kv('Created', esc(dtFull(t.created_at)) + ' <span class="muted">(' + ageText(t.created_at) + ' ago)</span>') +
         kv('Due', t.due_by ? esc(dtFull(t.due_by)) + ' · ' + dueText(t.due_by) : '') +
         kv('Last updated', esc(dtFull(t.updated_at))) +
@@ -788,7 +789,7 @@ function openTicket(id) {
 }
 function exportTicketCsv() {
   var rows = S.cache.ticketRows || [];
-  var cols = ['id', 'subject', 'type', 'status', 'pending_reason', 'grp', 'responder', 'requester', 'entity', 'sub_category', 'created_at', 'due_by', 'updated_at', 'last_comment_at', 'last_comment_by'];
+  var cols = ['id', 'subject', 'type', 'status', 'pending_reason', 'grp', 'responder', 'requester', 'entity', 'category', 'sub_category', 'item', 'created_at', 'due_by', 'updated_at', 'last_comment_at', 'last_comment_by'];
   var q = function (v) { v = v == null ? '' : String(v); return '"' + v.split('"').join('""') + '"'; };
   var csv = cols.join(',') + NL + rows.map(function (r) { return cols.map(function (c) { return q(r[c]); }).join(','); }).join(NL);
   var a = document.createElement('a');
