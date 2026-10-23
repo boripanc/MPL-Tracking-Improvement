@@ -37,6 +37,20 @@ test('serves the page, script, styles and Chart.js', async () => {
   for (const url of ['/app.js', '/styles.css', '/vendor/chart.umd.js']) assert.equal((await api.call('GET', url)).status, 200, url);
 });
 
+test('page, script and styles are re-validated on every load and use versioned links', async () => {
+  const page = await api.call('GET', '/');
+  assert.equal(page.headers.get('cache-control'), 'no-cache');
+  const js = /src="(app[.]js[?]v=[^"]+)"/.exec(page.text);
+  const css = /href="(styles[.]css[?]v=[^"]+)"/.exec(page.text);
+  assert.ok(js && css, 'script and stylesheet links carry a version');
+  for (const url of ['/' + js[1], '/' + css[1], '/app.js']) {
+    const r = await api.call('GET', url);
+    assert.equal(r.status, 200, url);
+    assert.equal(r.headers.get('cache-control'), 'no-cache', url);
+  }
+  assert.equal((await api.call('GET', '/index.html')).headers.get('cache-control'), 'no-cache');
+});
+
 test('dashboard summarises the last 7 days with categories and known errors', async () => {
   const r = await api.call('GET', '/api/dashboard?tz=Asia/Bangkok');
   assert.equal(r.status, 200);

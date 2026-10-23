@@ -52,7 +52,11 @@ function show(tab) {
   window.scrollTo(0, 0);
   return load();
 }
-function load() { var f = { dash: loadDash, errors: loadErrors, known: loadKnown, cats: loadCats, certs: loadCerts }[S.tab]; return f().catch(fail); }
+function load() {
+  var loaders = { dash: loadDash, errors: loadErrors, known: loadKnown, cats: loadCats, certs: loadCerts };
+  if (!loaders[S.tab]) return show('dash'); // unknown menu: fall back to the dashboard instead of failing
+  return loaders[S.tab]().catch(fail);
+}
 function loadMeta() {
   return get('api/meta').then(function (m) {
     S.meta = m;
