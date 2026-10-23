@@ -116,7 +116,8 @@ function loadConfig(env = process.env) {
       // Freshservice tickets table filled by the n8n workflow "FreshServices Tickets" (Ticket pulse menu).
       table: env.TICKETS_TABLE || 'tickets',
       // Link to a ticket; {number} = digits of the ticket id (INC-123 -> 123), {id} = the whole id.
-      linkTemplate: env.TICKET_URL || '',
+      // Set TICKET_URL=off to hide the links.
+      linkTemplate: /^(off|none|false)$/i.test(env.TICKET_URL || '') ? '' : (env.TICKET_URL || 'https://itservice.thaiunion.com/a/tickets/{number}'),
       dueSoonHours: Math.max(1, int(env.TICKETS_DUE_SOON_HOURS, 72)),
       staleHours: Math.max(1, int(env.TICKETS_STALE_HOURS, 24)),
     },

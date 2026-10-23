@@ -150,7 +150,7 @@ means the workflow has not run or its Freshservice cookie expired.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `TICKETS_TABLE` | `tickets` | Table with the Freshservice tickets (`schema.table` is allowed). |
-| `TICKET_URL` | (none) | Link to a ticket, e.g. `https://itservice.thaiunion.com/a/tickets/{number}` (`{number}` = digits of `INC-123`, `{id}` = the whole id). |
+| `TICKET_URL` | `https://itservice.thaiunion.com/a/tickets/{number}` | Link to a ticket (`{number}` = digits of `INC-123`, `{id}` = the whole id). The ticket number in the list and the ticket panel link there. `off` hides the links. |
 | `TICKETS_DUE_SOON_HOURS` | `72` | Open tickets due within this many hours count as **Due soon**. |
 | `TICKETS_STALE_HOURS` | `24` | Warn when the newest ticket change is older than this. |
 

@@ -123,3 +123,9 @@ test('table name and ticket link helpers', () => {
   assert.equal(ticketLink('https://x/a/tickets/{number}', 'SR-45'), 'https://x/a/tickets/45');
   assert.equal(ticketLink('', 'SR-45'), null);
 });
+
+test('ticket links default to Freshservice and can be turned off', () => {
+  const { loadConfig } = require('../src/config');
+  assert.equal(loadConfig({}).tickets.linkTemplate, 'https://itservice.thaiunion.com/a/tickets/{number}');
+  assert.equal(loadConfig({ TICKET_URL: 'off' }).tickets.linkTemplate, '');
+});
