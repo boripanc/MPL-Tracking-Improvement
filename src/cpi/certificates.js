@@ -61,7 +61,8 @@ function toCertificate(r, now, thresholds) {
 
 async function fetchKeystoreEntries(client) {
   const entries = [];
-  let path = '/KeystoreEntries?$format=json';
+  // The keystore API rejects the $format option; JSON is requested via the Accept header instead.
+  let path = '/KeystoreEntries';
   for (let page = 0; path && page < MAX_PAGES; page++) {
     const res = await client.request(path);
     if (!res.ok) {

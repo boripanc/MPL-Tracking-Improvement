@@ -10,6 +10,7 @@ const DAY = 86400000;
 const odata = (ms) => `/Date(${ms})/`;
 
 function entry(alias, daysLeft, extra = {}) {
+  // Field names and formats as returned by the real tenant (e.g. Type 'Key Pair', SerialNumber '0xB92C8671').
   const now = Date.now();
   return {
     __metadata: { type: 'com.sap.hci.api.KeystoreEntry' },
@@ -33,6 +34,13 @@ function fakeCpi(pages, { failWith } = {}) {
     if (req.headers.authorization !== 'Bearer tok') { res.statusCode = 401; return res.end(); }
     if (url.pathname === '/api/v1/KeystoreEntries') {
       seen.keystore++;
+      // Like the real tenant: $format is not supported on this entity set, JSON comes via the Accept header.
+      if (url.searchParams.has('$format')) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'application/json');
+        return res.end(JSON.stringify({ error: { message: { value: 'The format query option is not supported.' } } }));
+      }
+      if (!/application[/]json/.test(req.headers.accept || '')) { res.statusCode = 406; return res.end(); }
       if (failWith) { res.statusCode = failWith; return res.end('Forbidden'); }
       const page = Number(url.searchParams.get('$skiptoken') || 0);
       const base = `http://127.0.0.1:${server.address().port}/api/v1/KeystoreEntries`;
@@ -83,7 +91,7 @@ test('toCertificate maps keystore fields', () => {
 
 test('GET /api/certificates reads all pages, classifies, sorts and caches', async () => {
   const cpi = await fakeCpi([
-    [entry('ok_cert', 400), entry('expired_cert', -5), entry('sap_cert', 20, { Owner: 'SAP', Type: 'KeyPair' })],
+    [entry('ok_cert', 400), entry('expired_cert', -5), entry('sap_cert', 20, { Owner: 'SAP', Type: 'Key Pair' })],
     [entry('soon_cert', 60), entry('no_end', 0, { ValidNotAfter: null })],
   ]);
   const api = await startApp(db.pool, cpiEnv(cpi.port));
