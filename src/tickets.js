@@ -20,6 +20,9 @@ const COLUMNS = {
   category: { col: 'category', type: 'text' },
   sub_category: { col: 'sub_category', type: 'text' },
   item: { col: 'item_category', type: 'text' },
+  issue_summary: { col: 'issue_summary', type: 'text' },
+  correction_solution: { col: 'correction_solution', type: 'text' },
+  root_cause: { col: 'root_cause', type: 'text' },
   pending_reason: { col: 'pending_reason', type: 'text' },
   grp: { col: 'group', type: 'text' },
   responder: { col: 'responder', type: 'text' },
@@ -37,6 +40,12 @@ const COLUMNS = {
 };
 
 const CLOSED_STATUSES = ['Resolved', 'Closed'];
+// Fields every resolved / closed ticket must have filled in (Freshservice custom fields, stored by n8n).
+const CLOSURE_FIELDS = [
+  { key: 'issue_summary', label: 'Issue/Investigation Summary' },
+  { key: 'correction_solution', label: 'Correction Solution' },
+  { key: 'root_cause', label: 'Root Cause' },
+];
 // How many bars the weekly / monthly / yearly views show.
 const BUCKETS = { week: 12, month: 12, year: 5 };
 // Left out of Ticket pulse: non-chargeable tickets (tag) and change tickets (Change Process Type).
@@ -100,7 +109,8 @@ function createTicketStore({ pool, config }) {
     if (have.has('change_process_type')) {
       where.push(`COALESCE(btrim(${quoteIdent('change_process_type')}::text), '') NOT IN (${EXCLUDED_CHANGE_TYPES.map((t) => `'${t}'`).join(', ')})`);
     }
-    return { ok: true, select, where: where.length ? 'WHERE ' + where.join('\n    AND ') : '' };
+    const closureStored = CLOSURE_FIELDS.every((f) => have.has(f.key));
+    return { ok: true, closureStored, select, where: where.length ? 'WHERE ' + where.join('\n    AND ') : '' };
   }
 
   const tk = (src) => `tk AS (
@@ -132,6 +142,12 @@ ${tk(src)},
 o AS (SELECT tk.*, now() - created_at AS age FROM tk WHERE NOT closed),
 created AS (SELECT tk.* FROM tk, rng WHERE created_at >= rng.f AND created_at < rng.t),
 resolved AS (SELECT tk.* FROM tk, rng WHERE closed AND updated_at >= rng.f AND updated_at < rng.t),
+incomplete AS (
+  SELECT r.*, array_remove(ARRAY[
+      CASE WHEN COALESCE(btrim(regexp_replace(r.issue_summary, '<[^>]*>|&nbsp;|\\s', '', 'g')), '') = '' THEN 'issue_summary' END,
+      CASE WHEN COALESCE(btrim(regexp_replace(r.correction_solution, '<[^>]*>|&nbsp;|\\s', '', 'g')), '') = '' THEN 'correction_solution' END,
+      CASE WHEN COALESCE(btrim(regexp_replace(r.root_cause, '<[^>]*>|&nbsp;|\\s', '', 'g')), '') = '' THEN 'root_cause' END], NULL) AS missing
+  FROM resolved r),
 b AS (SELECT COALESCE(view, CASE WHEN t - f <= interval '3 days' THEN 'hour' ELSE 'day' END) AS unit FROM rng),
 buckets AS (
   SELECT generate_series(date_trunc(b.unit, rng.f AT TIME ZONE rng.tz), date_trunc(b.unit, rng.t AT TIME ZONE rng.tz),
@@ -174,6 +190,12 @@ SELECT json_build_object(
       FROM o GROUP BY 1) x),
   'bySubCategory', (SELECT COALESCE(json_agg(x ORDER BY x.n DESC, x.name), '[]') FROM (
       SELECT COALESCE(sub_category, category, '(none)') AS name, count(*) AS n FROM created GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 10) x),
+  'closure', json_build_object(
+    'closed', (SELECT count(*) FROM incomplete),
+    'incomplete', (SELECT count(*) FROM incomplete WHERE cardinality(missing) > 0),
+    'rows', (SELECT COALESCE(json_agg(x), '[]') FROM (
+        SELECT id, subject, status, grp, responder, updated_at AS closed_at, missing FROM incomplete
+        WHERE cardinality(missing) > 0 ORDER BY updated_at DESC LIMIT 500) x)),
   'open', (SELECT COALESCE(json_agg(x), '[]') FROM (
       SELECT id, subject, type, status, pending_reason, grp, responder, requester, entity, category, sub_category, item,
              created_at, updated_at, due_by, last_comment_at, last_comment_by, last_comment_type
@@ -184,6 +206,9 @@ SELECT json_build_object(
     const { rows } = await pool.query(sql, [JSON.stringify({ from, to, tz, view, buckets: BUCKETS[view] || 0, soonHours: config.tickets.dueSoonHours })]);
     const data = rows[0].result;
     data.open.forEach((t) => { t.link = ticketLink(config.tickets.linkTemplate, t.id); });
+    data.closure.stored = src.closureStored;
+    data.closure.fields = CLOSURE_FIELDS;
+    data.closure.rows.forEach((t) => { t.link = ticketLink(config.tickets.linkTemplate, t.id); });
     const last = data.lastChange ? Date.parse(data.lastChange) : null;
     return {
       enabled: true,
@@ -207,4 +232,4 @@ SELECT json_build_object(
   return { pulse, ticket };
 }
 
-module.exports = { createTicketStore, BUCKETS, parseTableName, ticketLink, CLOSED_STATUSES, EXCLUDED_TAGS, EXCLUDED_CHANGE_TYPES };
+module.exports = { createTicketStore, CLOSURE_FIELDS, BUCKETS, parseTableName, ticketLink, CLOSED_STATUSES, EXCLUDED_TAGS, EXCLUDED_CHANGE_TYPES };
