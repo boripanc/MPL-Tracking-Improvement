@@ -203,7 +203,11 @@ function apiRouter({ pool, config, certificates, tickets }) {
   }));
 
   // Ticket pulse: Freshservice tickets from the table the n8n workflow "FreshServices Tickets" fills.
-  router.get('/tickets/pulse', handle((req) => tickets.pulse(range(req.query, config))));
+  router.get('/tickets/pulse', handle((req) => {
+    const view = req.query.view || '';
+    if (!['', 'day', 'week', 'month', 'year'].includes(view)) throw new HttpError(400, 'view must be day, week, month or year');
+    return tickets.pulse({ ...range(req.query, config), view: view === 'day' ? '' : view });
+  }));
 
   router.get('/tickets/:id', handle(async (req) => {
     const t = await tickets.ticket(text(req.params.id, 'id', 100, { required: true }));

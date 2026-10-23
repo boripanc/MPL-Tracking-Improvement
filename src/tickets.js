@@ -36,6 +36,8 @@ const COLUMNS = {
 };
 
 const CLOSED_STATUSES = ['Resolved', 'Closed'];
+// How many bars the weekly / monthly / yearly views show.
+const BUCKETS = { week: 12, month: 12, year: 5 };
 // Left out of Ticket pulse: non-chargeable tickets (tag) and change tickets (Change Process Type).
 const EXCLUDED_TAGS = ['noncharge', 'noncharged'];
 const EXCLUDED_CHANGE_TYPES = ['Standard', 'Normal', 'Emergency'];
@@ -106,21 +108,30 @@ function createTicketStore({ pool, config }) {
   FROM ${table.sql}
   ${src.where})`;
 
-  async function pulse({ from, to, tz }) {
+  // view: '' (the selected period, per day or hour) or 'week' / 'month' / 'year' (the last BUCKETS[view] weeks,
+  // months or years up to now, one bar each).
+  async function pulse({ from, to, tz, view = '' }) {
     const src = await source();
     if (!src.ok) return { enabled: false, reason: src.reason };
     const sql = `WITH p AS (SELECT $1::jsonb AS j),
-rng AS (
+rng0 AS (
   SELECT COALESCE(NULLIF(j->>'from', '')::timestamptz, now() - interval '7 days') AS f,
          COALESCE(NULLIF(j->>'to', '')::timestamptz, now()) AS t,
          COALESCE(NULLIF(j->>'tz', ''), 'Asia/Bangkok') AS tz,
-         (j->>'soonHours')::int AS soon
+         (j->>'soonHours')::int AS soon,
+         NULLIF(j->>'view', '') AS view, (j->>'buckets')::int AS n
   FROM p),
+rng AS (
+  SELECT CASE WHEN view IS NULL THEN f
+              ELSE (date_trunc(view, now() AT TIME ZONE tz) - ((n - 1) || ' ' || view)::interval) AT TIME ZONE tz END AS f,
+         CASE WHEN view IS NULL THEN t ELSE now() END AS t,
+         tz, soon, view
+  FROM rng0),
 ${tk(src)},
 o AS (SELECT tk.*, now() - created_at AS age FROM tk WHERE NOT closed),
 created AS (SELECT tk.* FROM tk, rng WHERE created_at >= rng.f AND created_at < rng.t),
 resolved AS (SELECT tk.* FROM tk, rng WHERE closed AND updated_at >= rng.f AND updated_at < rng.t),
-b AS (SELECT CASE WHEN t - f <= interval '3 days' THEN 'hour' ELSE 'day' END AS unit FROM rng),
+b AS (SELECT COALESCE(view, CASE WHEN t - f <= interval '3 days' THEN 'hour' ELSE 'day' END) AS unit FROM rng),
 buckets AS (
   SELECT generate_series(date_trunc(b.unit, rng.f AT TIME ZONE rng.tz), date_trunc(b.unit, rng.t AT TIME ZONE rng.tz),
                          ('1 ' || b.unit)::interval) AS bk
@@ -169,7 +180,7 @@ SELECT json_build_object(
       ORDER BY (due_by < now()) DESC NULLS LAST, due_by NULLS LAST, created_at
       LIMIT 1000) x)
 ) AS result`;
-    const { rows } = await pool.query(sql, [JSON.stringify({ from, to, tz, soonHours: config.tickets.dueSoonHours })]);
+    const { rows } = await pool.query(sql, [JSON.stringify({ from, to, tz, view, buckets: BUCKETS[view] || 0, soonHours: config.tickets.dueSoonHours })]);
     const data = rows[0].result;
     data.open.forEach((t) => { t.link = ticketLink(config.tickets.linkTemplate, t.id); });
     const last = data.lastChange ? Date.parse(data.lastChange) : null;
@@ -195,4 +206,4 @@ SELECT json_build_object(
   return { pulse, ticket };
 }
 
-module.exports = { createTicketStore, parseTableName, ticketLink, CLOSED_STATUSES, EXCLUDED_TAGS, EXCLUDED_CHANGE_TYPES };
+module.exports = { createTicketStore, BUCKETS, parseTableName, ticketLink, CLOSED_STATUSES, EXCLUDED_TAGS, EXCLUDED_CHANGE_TYPES };

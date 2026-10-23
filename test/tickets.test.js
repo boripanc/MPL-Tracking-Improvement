@@ -129,3 +129,16 @@ test('ticket links default to Freshservice and can be turned off', () => {
   assert.equal(loadConfig({}).tickets.linkTemplate, 'https://itservice.thaiunion.com/a/tickets/{number}');
   assert.equal(loadConfig({ TICKET_URL: 'off' }).tickets.linkTemplate, '');
 });
+
+test('weekly, monthly and yearly views group the trend by week, month and year', async () => {
+  for (const [view, n] of [['week', 12], ['month', 12], ['year', 5]]) {
+    const d = (await api.call('GET', `/api/tickets/pulse?view=${view}&tz=Asia/Bangkok`)).body;
+    assert.equal(d.range.unit, view);
+    assert.equal(d.series.length, n, view);
+    assert.equal(d.series.reduce((s, p) => s + p.created, 0), d.kpi.created, view);
+  }
+  const year = (await api.call('GET', '/api/tickets/pulse?view=year')).body;
+  assert.equal(year.kpi.created, 7); // every ticket that is not excluded, including INC-206 from 200 days ago
+  assert.equal((await api.call('GET', '/api/tickets/pulse?view=quarter')).status, 400);
+  assert.equal((await api.call('GET', '/api/tickets/pulse?view=day')).body.range.unit, 'day');
+});
