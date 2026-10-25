@@ -115,6 +115,15 @@ function createKanban(cfg, { pool, env = process.env } = {}) {
   const fetchFn = dispatcher ? (url, init) => undiciFetch(url, { ...init, dispatcher }) : undefined;
   let boardIdCache = null;
 
+  const expired = async () => {
+    await store.patch({ tokens: null });
+    return new KanbanError('The Kanban sign-in has expired or was revoked. Click "Connect Kanban board" and sign in again.', 409, { connect: true });
+  };
+  const refused = (err) => {
+    const code = err && (err.code || (err.cause && err.cause.code));
+    return err instanceof UnauthorizedError || code === 401 || code === 403 || /\b(401|403)\b/.test((err && err.message) || '');
+  };
+
   const notConnected = () => new KanbanError('The Kanban board is not connected yet. Click "Connect Kanban board" and sign in.', 409, { connect: true });
 
   async function session(fn) {
@@ -138,22 +147,20 @@ function createKanban(cfg, { pool, env = process.env } = {}) {
     } catch (err) {
       if (err instanceof KanbanError) throw err;
       const host = new URL(cfg.url).host;
-      if (err instanceof UnauthorizedError) {
-        if (useOAuth) {
-          await store.patch({ tokens: null });
-          throw new KanbanError('The Kanban sign-in has expired or was revoked. Click "Connect Kanban board" and sign in again.', 409, { connect: true });
-        }
+      // A token the server no longer takes: forget it and ask for a new sign-in (OAuth), or name the key.
+      if (refused(err)) {
+        if (useOAuth) throw await expired();
         throw new KanbanError(`The Kanban server ${host} refused the login. Check KANBAN_MCP_TOKEN.`);
-      }
-      const code = err && (err.code || (err.cause && err.cause.code));
-      if (code === 401 || code === 403 || /\b(401|403)\b/.test(err.message || '')) {
-        throw new KanbanError(`The Kanban server ${host} refused the login${useOAuth ? '' : '. Check KANBAN_MCP_TOKEN'}.`);
       }
       throw new KanbanError(`Cannot reach the Kanban server ${host}: ${err.message}`);
     }
     const call = async (name, args = {}) => toolResult(name, await client.callTool({ name, arguments: args }, undefined, opts));
     try {
       return await fn(call);
+    } catch (err) {
+      // The token can also be revoked between two calls of the same request.
+      if (useOAuth && !(err instanceof KanbanError) && refused(err)) throw await expired();
+      throw err;
     } finally {
       await client.close().catch(() => {});
     }
@@ -161,8 +168,13 @@ function createKanban(cfg, { pool, env = process.env } = {}) {
 
   /* ----- OAuth connect / callback / disconnect ----- */
 
-  /** Starts the sign-in. `redirectUri` is where the Kanban app sends the browser back. Returns the URL to open. */
-  async function connect({ redirectUri, user }) {
+  /**
+   * Starts the sign-in. `redirectUri` is where the Kanban app sends the browser back. Returns the URL to open.
+   * `force` (the "Sign in again" link): forget the saved tokens and client registration first, so nothing old is
+   * reused, and ask the Kanban app to show its login page even if the browser is still signed in there
+   * (prompt=login), so another account can be picked.
+   */
+  async function connect({ redirectUri, user, force = false }) {
     if (!useOAuth) throw new KanbanError('This server uses a fixed Kanban API key (KANBAN_MCP_TOKEN), so there is nothing to connect.', 409);
     // The Kanban server only takes an https callback (or http on localhost). When this app is opened over plain
     // http on another host and no KANBAN_OAUTH_REDIRECT_URL is set, the sign-in returns to http://localhost and
@@ -177,6 +189,10 @@ function createKanban(cfg, { pool, env = process.env } = {}) {
     let uri = cfg.redirectUrl || redirectUri;
     const paste = !cfg.redirectUrl && !callbackAllowed(uri);
     if (paste) uri = `http://localhost${CALLBACK_PATH}`;
+    if (force) {
+      await store.patch({ tokens: null, client: null, verifier: null, connectedBy: null, connectedAt: null });
+      boardIdCache = null;
+    }
     const saved = await store.get();
     // A client registered for another callback address (the app moved) has to register again.
     const stale = saved.client && Array.isArray(saved.client.redirect_uris) && !saved.client.redirect_uris.includes(uri);
@@ -191,7 +207,11 @@ function createKanban(cfg, { pool, env = process.env } = {}) {
       throw new KanbanError(`Cannot start the Kanban sign-in: ${err.message}`);
     }
     if (result !== 'REDIRECT' || !url) throw new KanbanError('The Kanban server did not ask for a sign-in.');
-    return { url: url.toString(), paste };
+    if (force) {
+      url = new URL(url);
+      url.searchParams.set('prompt', 'login');
+    }
+    return { url: url.toString(), paste, force };
   }
 
   /** Finishes the sign-in with the code and state the Kanban app sent back. */

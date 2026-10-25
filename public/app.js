@@ -289,12 +289,16 @@ function openDetail(guid) {
 /* ---------- Kanban card from an error (TodoList Kanban over MCP) ---------- */
 function cardLink(k, c) { return k.cardUrl ? '<a href="' + esc(k.cardUrl.split('{id}').join(encodeURIComponent(c.id))) + '" target="_blank" rel="noopener">' + esc(c.title) + ' ↗</a>' : esc(c.title); }
 function kanbanOn() { return !!(S.meta.kanban && S.meta.kanban.enabled); }
-function connectKanban(btn, guid) {
+// force = "Sign in again": the saved Kanban login is dropped and the Kanban login page is always shown.
+function connectKanban(btn, guid, force) {
+  var label = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; btn.textContent = 'Opening sign-in…'; }
-  request('POST', 'api/kanban/connect').then(function (r) {
+  request('POST', 'api/kanban/connect', force ? { force: true } : undefined).then(function (r) {
+    if (force) S.meta.kanban = Object.assign({}, S.meta.kanban, { connected: false, connectedBy: null, connectedAt: null });
     if (!r.paste) { window.location.href = r.url; return; }
     // This app is not on https, so the sign-in ends on http://localhost and the address is pasted back here.
-    openDrawer(drawerHead('Connect Kanban board') +
+    openDrawer(drawerHead(force ? 'Sign in to the Kanban board again' : 'Connect Kanban board') +
+      (force ? '<p class="small">The old Kanban login was removed. Sign in with the account that should create the cards.</p>' : '') +
       '<ol class="small" style="padding-left:18px;line-height:1.6">' +
         '<li><a href="' + esc(r.url) + '" target="_blank" rel="noopener">Open the Kanban sign-in ↗</a>, sign in and approve.</li>' +
         '<li>The new tab then goes to an address ending in <span class="mono">/kanban/oauth/callback?…code=…</span> (on localhost or on the Kanban site). The page may not load or may show an error; that is expected.</li>' +
@@ -312,7 +316,7 @@ function connectKanban(btn, guid) {
         if (guid) openDetail(guid); else closeDrawer();
       }).catch(function (e) { b.disabled = false; fail(e); });
     };
-  }).catch(function (e) { if (btn) { btn.disabled = false; btn.textContent = 'Connect Kanban board'; } fail(e); });
+  }).catch(function (e) { if (btn) { btn.disabled = false; btn.textContent = label || 'Connect Kanban board'; } fail(e); });
 }
 function kanbanConnectBox(msg) {
   return '<div class="row" id="d-kb"><span class="muted small">' + esc(msg) + '</span><button class="btn sm pri" id="d-kconn">Connect Kanban board</button></div>';
@@ -328,10 +332,16 @@ function loadCardInfo(guid) {
     }
     var ex = k.existing || [];
     var who = S.meta.kanban && S.meta.kanban.auth === 'oauth'
-      ? '<div class="muted small" style="margin-top:6px">Cards are created as the Kanban account connected' + (S.meta.kanban.connectedBy ? ' by ' + esc(S.meta.kanban.connectedBy) : '') + '. <a href="#" id="d-kdis">Disconnect</a></div>' : '';
+      ? '<div class="muted small" style="margin-top:6px">Cards are created as the Kanban account connected' + (S.meta.kanban.connectedBy ? ' by ' + esc(S.meta.kanban.connectedBy) : '') + '. <a href="#" id="d-kre">Sign in again</a> · <a href="#" id="d-kdis">Disconnect</a></div>' : '';
     box.outerHTML = '<div id="d-kb">' + (ex.length ? '<table><tbody>' + ex.map(function (c) { return '<tr><td>' + cardLink(k, c) + '</td><td class="nowrap">' + pill(c.column, 'cat') + '</td><td class="muted small nowrap">' + esc(dt(c.createdAt)) + '</td></tr>'; }).join('') + '</tbody></table>' : '') +
       '<div class="row"><span class="muted small">' + (ex.length ? ex.length + ' card' + (ex.length > 1 ? 's' : '') + ' on ' : 'No card yet on ') + esc(k.board.title) + '.</span><button class="btn sm' + (ex.length ? '' : ' pri') + '" id="d-card">' + (ex.length ? 'Create another card' : 'Create Kanban card') + '</button></div>' + who + '</div>';
     $('#d-card').onclick = function () { openCard(guid, k); };
+    var re = $('#d-kre');
+    if (re) re.onclick = function (ev) {
+      ev.preventDefault();
+      if (!confirm('Sign in to the Kanban board again? The current Kanban login is removed now, and cards can be created again once the new sign-in is finished.')) return;
+      connectKanban(null, guid, true);
+    };
     var dis = $('#d-kdis');
     if (dis) dis.onclick = function (ev) {
       ev.preventDefault();

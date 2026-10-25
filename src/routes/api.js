@@ -168,10 +168,17 @@ function apiRouter({ pool, config, certificates, tickets, kanban }) {
   router.get('/kanban/status', handle(() => kanban.status()));
 
   // Starts the OAuth sign-in; the browser opens the returned URL and comes back to /kanban/oauth/callback.
-  router.post('/kanban/connect', handle((req) => kanbanCall(() => kanban.connect({
-    redirectUri: `${req.protocol}://${publicHost(req)}${CALLBACK_PATH}`,
-    user: req.user,
-  }))));
+  // { force: true } = sign in again from scratch: the saved tokens are dropped and the login page is always shown.
+  router.post('/kanban/connect', handle(async (req) => {
+    const force = (req.body || {}).force === true;
+    const r = await kanbanCall(() => kanban.connect({
+      redirectUri: `${req.protocol}://${publicHost(req)}${CALLBACK_PATH}`,
+      user: req.user,
+      force,
+    }));
+    if (force) console.log(`[kanban] ${req.user || 'user'} forced a new Kanban sign-in (old tokens dropped)`);
+    return r;
+  }));
 
   // Paste mode: the sign-in ended on http://localhost/...; the user pastes that address here to finish it.
   router.post('/kanban/finish', handle(async (req) => {

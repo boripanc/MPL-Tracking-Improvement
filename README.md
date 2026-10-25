@@ -173,7 +173,14 @@ per request. The proxy variables (`HTTPS_PROXY`, `NO_PROXY`) apply here too.
 The app registers itself with the Kanban server (dynamic client registration), uses PKCE, keeps the client and the
 tokens in the `kanban_oauth` table (created automatically) and refreshes the access token by itself. Cards are
 created as the account that connected, for everyone who uses this app. **Disconnect** (in the Kanban section)
-forgets the tokens. If the tokens are revoked, the section asks to connect again.
+forgets the tokens. If the tokens are revoked or refused (401/403), the app drops them and the section asks to
+connect again.
+
+**Sign in again** (next to Disconnect) forces a fresh sign-in: it removes the saved tokens and the client
+registration at once, registers the app again and opens the Kanban login page with `prompt=login`, so the login
+form is shown even when the browser is still signed in to WorkStream. Use it to switch to another Kanban account or
+when the connection looks stuck. Until the new sign-in is finished, no cards can be created (automatic cards say why).
+API: `POST /api/kanban/connect` with `{"force": true}`.
 
 The callback address is the address you opened the app with plus `/kanban/oauth/callback`. The Kanban server only
 accepts **https** callbacks (or http on localhost):
