@@ -191,4 +191,4 @@ async function checkConnection(cfg, { env = process.env } = {}) {
   return { ok: ks && mpl, steps };
 }
 
-module.exports = { createClient, checkConnection, describeNetworkError, proxyInUse, CpiError };
+module.exports = { createClient, checkConnection, describeNetworkError, proxyInUse, proxyAgent, CpiError };

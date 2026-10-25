@@ -273,6 +273,7 @@ function openDetail(guid) {
       '</div>' +
       '<h3>Category</h3>' + (d.category ? '<div>' + pill(d.category.category_name, 'cat') + ' <span class="muted mono">' + esc(d.category.category_expression) + '</span></div>' : '<div class="row"><span class="muted">Uncategorized</span><button class="btn sm" id="d-cat">Create a category from this error</button></div>') +
       '<h3>Root cause &amp; solution</h3>' + (a ? analysisBlock(a) : '<div class="row"><span class="muted">No known error matches this message yet.</span><button class="btn sm pri" id="d-an">Record root cause &amp; solution</button></div>') +
+      (S.meta.kanban ? '<h3>Kanban</h3><div class="row" id="d-kb"><span class="muted small">Checking the board…</span></div>' : '') +
       '<h3>Error text</h3><pre class="err">' + esc(d.errormsg || '(no error text returned by CPI)') + '</pre>' +
       (d.attributes.length ? '<h3>Custom header properties</h3><table><tbody>' + d.attributes.map(function (x) { return '<tr><td class="muted">' + esc(x.name) + '</td><td class="mono">' + esc(x.value) + '</td></tr>'; }).join('') + '</tbody></table>' : '') +
       (d.related.length ? '<h3>Other messages with the same correlation ID</h3><table><tbody>' + d.related.map(function (r) { return '<tr class="click" data-g="' + esc(r.message_guid) + '"><td class="nowrap">' + dt(r.log_start) + '</td><td>' + esc(r.flow) + '</td><td>' + pill(r.status) + '</td></tr>'; }).join('') + '</tbody></table>' : '');
@@ -281,7 +282,57 @@ function openDetail(guid) {
     var da = $('#d-an'); if (da) da.onclick = function () { openAnalysis({ integration_flow_name: m.flow, errormessage: suggestPattern(d.errormsg), status: 'Open' }); };
     var de = $('#d-edit'); if (de) de.onclick = function () { openAnalysis(a); };
     $$('#dr tr[data-g]').forEach(function (t) { t.onclick = function () { openDetail(t.dataset.g); }; });
+    if (S.meta.kanban) loadCardInfo(guid);
   }).catch(fail);
+}
+
+/* ---------- Kanban card from an error (TodoList Kanban over MCP) ---------- */
+function cardLink(k, c) { return k.cardUrl ? '<a href="' + esc(k.cardUrl.split('{id}').join(encodeURIComponent(c.id))) + '" target="_blank" rel="noopener">' + esc(c.title) + ' ↗</a>' : esc(c.title); }
+function loadCardInfo(guid) {
+  get('api/errors/' + encodeURIComponent(guid) + '/card').then(function (k) {
+    var box = $('#d-kb'); if (!box) return;
+    var ex = k.existing || [];
+    box.outerHTML = '<div id="d-kb">' + (ex.length ? '<table><tbody>' + ex.map(function (c) { return '<tr><td>' + cardLink(k, c) + '</td><td class="nowrap">' + pill(c.column, 'cat') + '</td><td class="muted small nowrap">' + esc(dt(c.createdAt)) + '</td></tr>'; }).join('') + '</tbody></table>' : '') +
+      '<div class="row"><span class="muted small">' + (ex.length ? ex.length + ' card' + (ex.length > 1 ? 's' : '') + ' on ' : 'No card yet on ') + esc(k.board.title) + '.</span><button class="btn sm' + (ex.length ? '' : ' pri') + '" id="d-card">' + (ex.length ? 'Create another card' : 'Create Kanban card') + '</button></div></div>';
+    $('#d-card').onclick = function () { openCard(guid, k); };
+  }).catch(function (e) {
+    var box = $('#d-kb'); if (box) box.innerHTML = '<span class="bad small">' + esc(e.message) + '</span>';
+  });
+}
+function openCard(guid, k) {
+  var s = k.suggested, d = k.defaults;
+  var checks = function (name, all, on) {
+    return '<div class="row" style="flex-wrap:wrap;gap:4px 14px">' + all.map(function (x, i) {
+      return '<label class="small"><input type="checkbox" name="' + name + '" value="' + esc(x) + '"' + (on.indexOf(x) >= 0 ? ' checked' : '') + '> ' + esc(x) + '</label>';
+    }).join('') + '</div>';
+  };
+  openDrawer(drawerHead('New Kanban card') +
+    '<p class="muted small" style="margin-top:0">Creates a card on <b>' + esc(k.board.title) + '</b> with the error details. Edit anything before you create it.</p>' +
+    '<label class="f" for="c-title">Title</label><input id="c-title" style="width:100%" maxlength="200" value="' + esc(s.title) + '">' +
+    '<div class="row" style="gap:12px;flex-wrap:wrap">' +
+      '<div><label class="f" for="c-col">Column</label><select id="c-col">' + opts(k.columns.map(function (c) { return [c, c]; }), k.columns.indexOf(d.column) >= 0 ? d.column : k.columns[0]) + '</select></div>' +
+      '<div><label class="f" for="c-pri">Priority</label><select id="c-pri">' + opts(['none', 'low', 'medium', 'high', 'urgent'].map(function (p) { return [p, p[0].toUpperCase() + p.slice(1)]; }), d.priority) + '</select></div>' +
+      '<div><label class="f" for="c-as">Assignee</label><select id="c-as">' + opts([['', 'Nobody']].concat(k.team.map(function (t) { return [t, t]; })), '') + '</select></div>' +
+      '<div><label class="f" for="c-due">Due date</label><input id="c-due" type="date"></div>' +
+    '</div>' +
+    (k.labels.length ? '<label class="f">Labels</label>' + checks('c-lb', k.labels, d.labels) : '') +
+    '<label class="f" for="c-desc">Notes</label><textarea id="c-desc" rows="14">' + esc(s.description) + '</textarea>' +
+    (k.team.length ? '<p class="muted small">An assignee is a request: the board owner approves it in the Kanban app.</p>' : '') +
+    '<div class="row mt"><button class="btn pri" id="c-save">Create card</button><span class="sp"></span><button class="btn" id="c-back">Back to the error</button></div>');
+  $('#c-back').onclick = function () { openDetail(guid); };
+  $('#c-save').onclick = function () {
+    var p = {
+      title: $('#c-title').value.trim(), column: $('#c-col').value, priority: $('#c-pri').value, dueDate: $('#c-due').value,
+      description: $('#c-desc').value.trim(),
+      labels: $$('input[name="c-lb"]:checked').map(function (x) { return x.value; }),
+      assignees: $('#c-as').value ? [$('#c-as').value] : []
+    };
+    if (!p.title) { toast('The card needs a title', true); return; }
+    var b = this; b.disabled = true; b.textContent = 'Creating…';
+    request('POST', 'api/errors/' + encodeURIComponent(guid) + '/card', p).then(function (c) {
+      toast('Card created in ' + (c.column || p.column)); openDetail(guid);
+    }).catch(function (e) { b.disabled = false; b.textContent = 'Create card'; fail(e); });
+  };
 }
 function analysisBlock(a) {
   var last = a.comments && a.comments.length ? a.comments[a.comments.length - 1] : null;

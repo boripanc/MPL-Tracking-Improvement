@@ -10,6 +10,7 @@ const { cpiConfigured } = require('./config');
 const { createClient } = require('./cpi/client');
 const { createCertificateStore } = require('./cpi/certificates');
 const { createTicketStore } = require('./tickets');
+const { createKanban } = require('./kanban');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const VERSION = require('../package.json').version;
@@ -52,8 +53,9 @@ function securityHeaders(req, res, next) {
 }
 
 /** Creates the Express application. `pool` is a pg Pool, `config` comes from loadConfig(). */
-function createApp({ pool, config, certificates, tickets }) {
+function createApp({ pool, config, certificates, tickets, kanban }) {
   if (!tickets) tickets = createTicketStore({ pool, config });
+  if (!kanban) kanban = createKanban(config.kanban);
   const app = express();
   if (!certificates) {
     certificates = createCertificateStore({
@@ -80,7 +82,7 @@ function createApp({ pool, config, certificates, tickets }) {
 
   app.use(basicAuth(config.auth));
   app.use(express.json({ limit: '100kb' }));
-  app.use('/api', apiRouter({ pool, config, certificates, tickets }));
+  app.use('/api', apiRouter({ pool, config, certificates, tickets, kanban }));
   app.get('/vendor/chart.umd.js', (req, res) => res.sendFile(CHART_JS, { maxAge: '7d' }));
   // index.html, app.js and styles.css must always match each other, so the browser re-validates them on every
   // load (a cheap 304 when unchanged) instead of keeping an old copy after an upgrade.
