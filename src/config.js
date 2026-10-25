@@ -140,7 +140,9 @@ function loadConfig(env = process.env) {
       priority: (env.KANBAN_PRIORITY || 'medium').trim().toLowerCase(),
       // A known error saved with status Open gets a card by itself (once), assigned to these team members.
       autoCard: bool(env.KANBAN_AUTO_CARD, true),
-      autoAssignees: String(env.KANBAN_AUTO_ASSIGNEE || '').split(',').map((s) => s.trim()).filter(Boolean),
+      // Empty = the team member with the most free capacity; "none" = nobody; names = always them.
+      autoAssignees: /^none$/i.test((env.KANBAN_AUTO_ASSIGNEE || '').trim()) ? [] : String(env.KANBAN_AUTO_ASSIGNEE || '').split(',').map((s) => s.trim()).filter(Boolean),
+      autoAssignMode: /^none$/i.test((env.KANBAN_AUTO_ASSIGNEE || '').trim()) ? 'none' : (env.KANBAN_AUTO_ASSIGNEE || '').trim() ? 'fixed' : 'capacity',
       // Optional link to a card in the Kanban app; {id} = card id.
       cardUrl: (env.KANBAN_CARD_URL || '').trim(),
       timeoutMs: Math.max(1000, int(env.KANBAN_TIMEOUT_MS, 20000)),

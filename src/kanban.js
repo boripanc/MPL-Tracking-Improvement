@@ -251,6 +251,7 @@ function createKanban(cfg, { pool, env = process.env } = {}) {
       const id = await boardId(call);
       const b = await call('get_board', { boardId: id });
       const cards = search ? await call('find_cards', { boardId: id, search, limit: 20 }) : [];
+      const assignee = await suggestedAssignee(call, id);
       return {
         enabled: true,
         connected: true,
@@ -258,7 +259,7 @@ function createKanban(cfg, { pool, env = process.env } = {}) {
         columns: (b.columns || []).map((c) => c.title),
         labels: (b.labels || []).map((l) => l.name),
         team: (b.team || []).map((t) => t.name),
-        defaults: { column: cfg.column, labels: cfg.labels, priority: cfg.priority },
+        defaults: { column: cfg.column, labels: cfg.labels, priority: cfg.priority, assignee },
         existing: (Array.isArray(cards) ? cards : []).map(cardSummary),
         cardUrl: cfg.cardUrl,
       };
@@ -289,12 +290,50 @@ function createKanban(cfg, { pool, env = process.env } = {}) {
       const args = { boardId: id, column: cfg.column, title: card.title, description: card.description };
       if (cfg.labels.length) args.labels = cfg.labels;
       if (cfg.priority && cfg.priority !== 'none') args.priority = cfg.priority;
-      if (cfg.autoAssignees.length) args.assignees = cfg.autoAssignees;
-      return { card: cardSummary(await call('create_card', args)), existed: false };
+      const assign = await autoAssignee(call, id);
+      if (assign.names.length) args.assignees = assign.names;
+      const created = cardSummary(await call('create_card', args));
+      return { card: { ...created, assignees: assign.names, assignedBy: assign.by }, existed: false, assign };
     });
   }
 
+  /**
+   * Who an automatic card goes to. KANBAN_AUTO_ASSIGNEE: a list of names = always them, "none" = nobody,
+   * empty (default) = the team member with the most free capacity on the board (see pickByCapacity).
+   */
+  async function autoAssignee(call, id) {
+    if (cfg.autoAssignMode === 'none') return { names: [], by: 'none' };
+    if (cfg.autoAssignMode === 'fixed') return { names: cfg.autoAssignees, by: 'setting' };
+    try {
+      const w = await call('get_workload', { boardId: id });
+      const pick = pickByCapacity(w && w.members);
+      return pick ? { names: [pick.name], by: 'capacity', free: pick.free } : { names: [], by: 'capacity', reason: 'everyone is at or over capacity' };
+    } catch (err) {
+      // Never lose the card over this: create it unassigned.
+      console.error('[kanban] workload lookup failed:', err.message);
+      return { names: [], by: 'capacity', reason: `workload not available (${err.message})` };
+    }
+  }
+
+  /** Suggested assignee for the card form: the same capacity rule, or the fixed names. */
+  async function suggestedAssignee(call, id) {
+    const a = await autoAssignee(call, id);
+    return a.names[0] || '';
+  }
+
   return { enabled, useOAuth, status, connect, finish, disconnect, board, createCard, ensureKnownErrorCard };
+}
+
+/**
+ * The member with room left (open cards below capacity) and the most room; ties go to fewer overdue cards,
+ * then fewer open cards, then name. Nobody with room left = no one (the card stays unassigned).
+ */
+function pickByCapacity(members) {
+  const withRoom = (Array.isArray(members) ? members : [])
+    .map((m) => ({ name: m.name, free: Number(m.capacity || 0) - Number(m.openCount || 0), overdue: Number(m.overdue || 0), open: Number(m.openCount || 0) }))
+    .filter((m) => m.name && m.free > 0);
+  withRoom.sort((a, b) => b.free - a.free || a.overdue - b.overdue || a.open - b.open || a.name.localeCompare(b.name));
+  return withRoom[0] || null;
 }
 
 function cardSummary(c) {
@@ -368,4 +407,4 @@ function cardFromKnownError(ea, detail) {
   return { title, description: lines.join('\n').replace(/\n{3,}/g, '\n\n').slice(0, 8000) };
 }
 
-module.exports = { createKanban, cardFromError, cardFromKnownError, parseCallback, callbackAllowed, KanbanError, PRIORITIES, CALLBACK_PATH };
+module.exports = { createKanban, cardFromError, cardFromKnownError, pickByCapacity, parseCallback, callbackAllowed, KanbanError, PRIORITIES, CALLBACK_PATH };

@@ -357,12 +357,12 @@ function openCard(guid, k) {
     '<div class="row" style="gap:12px;flex-wrap:wrap">' +
       '<div><label class="f" for="c-col">Column</label><select id="c-col">' + opts(k.columns.map(function (c) { return [c, c]; }), k.columns.indexOf(d.column) >= 0 ? d.column : k.columns[0]) + '</select></div>' +
       '<div><label class="f" for="c-pri">Priority</label><select id="c-pri">' + opts(['none', 'low', 'medium', 'high', 'urgent'].map(function (p) { return [p, p[0].toUpperCase() + p.slice(1)]; }), d.priority) + '</select></div>' +
-      '<div><label class="f" for="c-as">Assignee</label><select id="c-as">' + opts([['', 'Nobody']].concat(k.team.map(function (t) { return [t, t]; })), '') + '</select></div>' +
+      '<div><label class="f" for="c-as">Assignee</label><select id="c-as">' + opts([['', 'Nobody']].concat(k.team.map(function (t) { return [t, t]; })), d.assignee || '') + '</select></div>' +
       '<div><label class="f" for="c-due">Due date</label><input id="c-due" type="date"></div>' +
     '</div>' +
     (k.labels.length ? '<label class="f">Labels</label>' + checks('c-lb', k.labels, d.labels) : '') +
     '<label class="f" for="c-desc">Notes</label><textarea id="c-desc" rows="14">' + esc(s.description) + '</textarea>' +
-    (k.team.length ? '<p class="muted small">An assignee is a request: the board owner approves it in the Kanban app.</p>' : '') +
+    (k.team.length ? '<p class="muted small">The assignee is preselected by free capacity on the board. An assignee is a request: the board owner approves it in the Kanban app.</p>' : '') +
     '<div class="row mt"><button class="btn pri" id="c-save">Create card</button><span class="sp"></span><button class="btn" id="c-back">Back to the error</button></div>');
   $('#c-back').onclick = function () { openDetail(guid); };
   $('#c-save').onclick = function () {
@@ -446,7 +446,9 @@ function openAnalysis(a) {
     (a.ea_id ? request('PUT', 'api/known-errors/' + a.ea_id, p) : request('POST', 'api/known-errors', p)).then(function (r) {
       var k = r && r.kanban;
       if (k && k.error) toast('Saved, but no Kanban card: ' + k.error, true);
-      else if (k && k.card) toast(k.existed ? 'Saved' : 'Saved · Kanban card created in ' + (k.card.column || 'the board'));
+      else if (k && k.card) toast(k.existed ? 'Saved' : 'Saved · Kanban card created in ' + (k.card.column || 'the board') +
+        (k.card.assignees && k.card.assignees.length ? ', assigned to ' + k.card.assignees.join(', ')
+          : k.card.assignedBy === 'capacity' ? ' (unassigned: nobody has free capacity)' : ''));
       else toast('Saved');
       closeDrawer(); refreshAll();
     }).catch(function (e) { b.disabled = false; fail(e); });

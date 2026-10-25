@@ -9,6 +9,7 @@ const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 const { setupDatabase, startApp } = require('./helpers');
 const { loadConfig, validateConfig } = require('../src/config');
+const { pickByCapacity } = require('../src/kanban');
 
 const TOKEN = 'test-key';
 let db;
@@ -16,6 +17,12 @@ let api;
 let mcp;
 let cards;
 let lastArgs;
+// What the fake server's get_workload reports (TUIP today: Boripan.C over capacity, Suthima.V with room).
+let workload = [];
+const WORKLOAD = [
+  { name: 'Boripan.C', capacity: 4, openCount: 6, overdue: 2 },
+  { name: 'Suthima.V', capacity: 4, openCount: 2, overdue: 0 },
+];
 
 // A small stand-in for the TodoList Kanban (WorkStream) MCP server, with the same tool names and result shape.
 // It accepts the fixed key TOKEN or an OAuth access token it issued itself (dynamic client registration,
@@ -38,6 +45,7 @@ function fakeKanbanServer() {
     });
     s.tool('find_cards', { boardId: z.string().optional(), search: z.string().optional(), limit: z.number().optional() }, async ({ search }) =>
       json(cards.filter((c) => !search || (c.title + c.description).includes(search))));
+    s.tool('get_workload', { boardId: z.string().optional() }, async () => json({ boards: [{ id: board.id, title: board.title }], members: workload, unassigned: [] }));
     s.tool('create_card', {
       boardId: z.string(), column: z.string(), title: z.string(), description: z.string().optional(),
       labels: z.array(z.string()).optional(), priority: z.string().optional(), assignees: z.array(z.string()).optional(),
@@ -135,6 +143,7 @@ function fakeKanbanServer() {
 
 test.before(async () => {
   cards = [];
+  workload = WORKLOAD;
   db = await setupDatabase();
   mcp = await fakeKanbanServer();
   api = await startApp(db.pool, { KANBAN_MCP_URL: mcp.url, KANBAN_MCP_TOKEN: TOKEN, KANBAN_CARD_URL: 'https://kanban.example/cards/{id}' });
@@ -169,7 +178,7 @@ test('suggests a card from the error and lists the board', async () => {
   assert.deepEqual(r.body.columns, ['Backlog', 'To do', 'In progress', 'Done']);
   assert.deepEqual(r.body.labels, ['Monitoring', 'R4C']);
   assert.deepEqual(r.body.team, ['Boripan.C']);
-  assert.deepEqual(r.body.defaults, { column: 'To do', labels: ['Monitoring'], priority: 'medium' });
+  assert.deepEqual(r.body.defaults, { column: 'To do', labels: ['Monitoring'], priority: 'medium', assignee: 'Suthima.V' });
   assert.deepEqual(r.body.existing, []);
   assert.equal(r.body.suggested.title, 'Fix error on INT406_TUE_IOT_COMB');
   assert.match(r.body.suggested.description, /Message ID: MPL-0001/);
@@ -342,7 +351,10 @@ test('a new known error creates its Kanban card by itself', async () => {
   assert.match(lastArgs.description, /Root cause: MWW API down/);
   assert.match(lastArgs.description, /Recorded from this message:[\s\S]*Message ID: MPL-0001/);
   assert.deepEqual(lastArgs.labels, ['Monitoring']);
-  assert.equal(lastArgs.assignees, undefined);
+  // Assigned to the member with free capacity (Boripan.C is over capacity).
+  assert.deepEqual(lastArgs.assignees, ['Suthima.V']);
+  assert.deepEqual(r.body.kanban.card.assignees, ['Suthima.V']);
+  assert.equal(r.body.kanban.card.assignedBy, 'capacity');
 
   // Editing the known error does not create another card, neither in another status nor saved as Open again.
   const n = cards.length;
@@ -463,5 +475,40 @@ test('OAuth: a callback address on the Kanban server itself is refused with a cl
   } finally {
     await wrong.close();
     await badPath.close();
+  }
+});
+
+test('capacity rule: most room wins, ties go to fewer overdue then fewer open cards; full team = nobody', () => {
+  assert.equal(pickByCapacity(WORKLOAD).name, 'Suthima.V');
+  assert.equal(pickByCapacity([
+    { name: 'A', capacity: 4, openCount: 2, overdue: 1 },
+    { name: 'B', capacity: 5, openCount: 3, overdue: 0 },
+  ]).name, 'B');
+  assert.equal(pickByCapacity([
+    { name: 'A', capacity: 4, openCount: 1 },
+    { name: 'B', capacity: 6, openCount: 2 },
+  ]).name, 'B');
+  assert.equal(pickByCapacity([{ name: 'A', capacity: 2, openCount: 2 }, { name: 'B', capacity: 1, openCount: 3 }]), null);
+  assert.equal(pickByCapacity(undefined), null);
+});
+
+test('auto assign: nobody with room leaves the card unassigned; "none" turns it off', async () => {
+  const none = await startApp(db.pool, { KANBAN_MCP_URL: mcp.url, KANBAN_MCP_TOKEN: TOKEN, KANBAN_AUTO_ASSIGNEE: 'none' });
+  try {
+    workload = [{ name: 'Boripan.C', capacity: 4, openCount: 6 }, { name: 'Suthima.V', capacity: 4, openCount: 4 }];
+    const full = await api.call('POST', '/api/known-errors', KNOWN);
+    assert.equal(full.status, 201);
+    assert.equal(lastArgs.assignees, undefined);
+    assert.equal(full.body.kanban.card.assignedBy, 'capacity');
+    assert.match(full.body.kanban.assign.reason, /capacity/);
+
+    workload = WORKLOAD;
+    const off = await none.call('POST', '/api/known-errors', KNOWN);
+    assert.equal(off.status, 201);
+    assert.equal(lastArgs.assignees, undefined);
+    assert.equal(off.body.kanban.card.assignedBy, 'none');
+  } finally {
+    workload = WORKLOAD;
+    await none.close();
   }
 });
