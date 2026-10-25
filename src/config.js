@@ -121,6 +121,20 @@ function loadConfig(env = process.env) {
       dueSoonHours: Math.max(1, int(env.TICKETS_DUE_SOON_HOURS, 72)),
       staleHours: Math.max(1, int(env.TICKETS_STALE_HOURS, 24)),
     },
+    kanban: {
+      // MCP server of the TodoList Kanban app (Streamable HTTP), used to create a card from an error.
+      url: (env.KANBAN_MCP_URL || '').trim(),
+      token: (env.KANBAN_MCP_TOKEN || '').trim(),
+      // Header that carries the token: Authorization sends "Bearer <token>", any other header sends the token as is.
+      authHeader: (env.KANBAN_MCP_AUTH_HEADER || 'Authorization').trim(),
+      board: (env.KANBAN_BOARD || '').trim(),
+      column: (env.KANBAN_COLUMN || 'To do').trim(),
+      labels: String(env.KANBAN_LABELS === undefined ? 'Monitoring' : env.KANBAN_LABELS).split(',').map((s) => s.trim()).filter(Boolean),
+      priority: (env.KANBAN_PRIORITY || 'medium').trim().toLowerCase(),
+      // Optional link to a card in the Kanban app; {id} = card id.
+      cardUrl: (env.KANBAN_CARD_URL || '').trim(),
+      timeoutMs: Math.max(1000, int(env.KANBAN_TIMEOUT_MS, 20000)),
+    },
     poller: {
       enabled: bool(env.CPI_POLL_ENABLED, false),
       ...cpiConnection(env),
@@ -148,6 +162,11 @@ function validateConfig(config) {
   if (config.tickets.linkTemplate && !/^https?:[/][/]/i.test(config.tickets.linkTemplate)) {
     problems.push('TICKET_URL must start with http:// or https://.');
   }
+  const k = config.kanban;
+  if (k.url && !/^https?:[/][/]/i.test(k.url)) problems.push('KANBAN_MCP_URL must start with http:// or https://.');
+  if (k.cardUrl && !/^https?:[/][/]/i.test(k.cardUrl)) problems.push('KANBAN_CARD_URL must start with http:// or https://.');
+  if (!/^[A-Za-z0-9-]+$/.test(k.authHeader)) problems.push('KANBAN_MCP_AUTH_HEADER must be a header name such as Authorization or X-API-Key.');
+  if (!['none', 'low', 'medium', 'high', 'urgent'].includes(k.priority)) problems.push('KANBAN_PRIORITY must be none, low, medium, high or urgent.');
   const missing = missingCpiVars(config);
   if (missing.length > 0 && missing.length < 4) {
     problems.push(`CPI connection is partly configured; also set: ${missing.join(', ')}.`);

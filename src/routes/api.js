@@ -5,6 +5,7 @@ const SQL = require('../sql');
 const { queryResult } = require('../db');
 const { HttpError } = require('../middleware/errors');
 const { checkConnection } = require('../cpi/client');
+const { cardFromError, KanbanError, PRIORITIES } = require('../kanban');
 
 const STATUSES = ['Open', 'In Progress', 'Monitoring', 'Resolved'];
 const MPL_STATUSES = ['FAILED', 'ESCALATED', 'RETRY'];
@@ -78,9 +79,28 @@ function categoryBody(b) {
   };
 }
 
+function list(value, field) {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (!Array.isArray(value) || value.length > 20 || value.some((v) => typeof v !== 'string' || v.length > 100)) {
+    throw new HttpError(400, `${field} must be a list of names`);
+  }
+  return value.map((v) => v.trim()).filter(Boolean);
+}
+
+/** Turns Kanban failures into a readable HTTP error (409 = not configured, 502 = the Kanban server failed). */
+async function kanbanCall(fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err instanceof KanbanError) throw new HttpError(err.status, err.message);
+    console.error('[kanban] request failed:', err);
+    throw new HttpError(502, `Kanban server error: ${err.message}`);
+  }
+}
+
 /* ---------- router ---------- */
 
-function apiRouter({ pool, config, certificates, tickets }) {
+function apiRouter({ pool, config, certificates, tickets, kanban }) {
   const router = express.Router();
   const run = (sql, params) => queryResult(pool, sql, params);
   const handle = (fn) => (req, res, next) => {
@@ -92,7 +112,7 @@ function apiRouter({ pool, config, certificates, tickets }) {
 
   router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 
-  router.get('/meta', handle(async () => ({ ...(await run(SQL.meta)), certificatesCanSync: certificates.canSync })));
+  router.get('/meta', handle(async () => ({ ...(await run(SQL.meta)), certificatesCanSync: certificates.canSync, kanban: kanban.enabled })));
 
   router.get('/dashboard', handle((req) => run(SQL.dashboard, range(req.query, config))));
 
@@ -121,6 +141,41 @@ function apiRouter({ pool, config, certificates, tickets }) {
     const data = await run(SQL.errorDetail, { guid });
     if (!data || !data.mpl) throw new HttpError(404, 'Message not found');
     return data;
+  }));
+
+  // Kanban (TodoList Kanban app over MCP): board columns/labels/team, the suggested card for this error and the
+  // cards that already mention its message ID.
+  router.get('/errors/:guid/card', handle(async (req) => {
+    const guid = text(req.params.guid, 'guid', 100, { required: true });
+    const data = await run(SQL.errorDetail, { guid });
+    if (!data || !data.mpl) throw new HttpError(404, 'Message not found');
+    if (!kanban.enabled) return { enabled: false, suggested: cardFromError(data) };
+    return { ...(await kanbanCall(() => kanban.board({ search: guid }))), suggested: cardFromError(data) };
+  }));
+
+  router.post('/errors/:guid/card', handle(async (req, res) => {
+    const guid = text(req.params.guid, 'guid', 100, { required: true });
+    const data = await run(SQL.errorDetail, { guid });
+    if (!data || !data.mpl) throw new HttpError(404, 'Message not found');
+    const b = req.body || {};
+    const suggested = cardFromError(data);
+    const priority = b.priority === undefined || b.priority === '' ? config.kanban.priority : b.priority;
+    if (!PRIORITIES.includes(priority)) throw new HttpError(400, `priority must be one of: ${PRIORITIES.join(', ')}`);
+    const dueDate = text(b.dueDate, 'dueDate', 10);
+    if (dueDate && !/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) throw new HttpError(400, 'dueDate must be YYYY-MM-DD');
+    const input = {
+      title: text(b.title, 'title', 200) || suggested.title,
+      description: text(b.description, 'description', 8000) || suggested.description,
+      column: text(b.column, 'column', 100),
+      labels: b.labels === undefined ? config.kanban.labels : list(b.labels, 'labels'),
+      assignees: list(b.assignees, 'assignees'),
+      priority,
+      dueDate,
+    };
+    const card = await kanbanCall(() => kanban.createCard(input));
+    console.log(`[kanban] ${req.user || 'user'} created card ${card.id} for message ${guid}`);
+    res.status(201);
+    return card;
   }));
 
   router.get('/known-errors', handle((req) => run(SQL.knownErrors, range(req.query, config))));

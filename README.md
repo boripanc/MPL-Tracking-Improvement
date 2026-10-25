@@ -17,6 +17,7 @@ existing `errorscenario` view, so the app and the view always agree.
 | **Known errors & solutions** | Create / edit / delete entries in `error_analyzed`, set status (Open, In Progress, Monitoring, Resolved), add comments. A status change automatically adds a comment such as "Status changed from Open to Resolved by alice". |
 | **Categories** | Create / edit / delete rules in `error_category`, optionally limited to one iFlow, and see how many errors each rule catches. |
 | **Ticket pulse** | Health of the Freshservice ticket queue (from the table the n8n workflow fills): open backlog, overdue, due soon, unassigned, created vs. resolved per day, backlog by age, group, responder and status, and a filterable list of open tickets with their last comment. The menu shows a red badge with the number of overdue tickets. |
+| **Kanban card** (in the error details) | Turns an error into a card on the TodoList Kanban board (through the board's MCP server). The form is filled with the iFlow, message and correlation IDs, category, known root cause, CPI link and error text; pick the column, priority, labels, assignee and due date, then create. The error details list the cards that already mention the message ID, so the same error is not filed twice. Shown only when `KANBAN_MCP_URL` is set. |
 | **Certificates** | Certificates and key pairs in the CPI tenant keystore (stored in the database by the n8n workflow) with their expiry date and days left: **Expired**, **Expires soon** (< 30 days), **Expiring** (< 90 days) or **Valid**. Filter by status or type, hide SAP-owned entries, search, open the full details (subject, issuer, serial, fingerprint) and export CSV. The menu shows a red badge with the number of expired and soon-expiring entries. |
 
 Both editors have a **Test against last 30 days** button that shows how many errors a pattern would match before you save it.
@@ -157,6 +158,27 @@ means the workflow has not run or its Freshservice cookie expired.
 | `TICKETS_DUE_SOON_HOURS` | `72` | Open tickets due within this many hours count as **Due soon**. |
 | `TICKETS_STALE_HOURS` | `24` | Warn when the newest ticket change is older than this. |
 
+## Kanban cards from errors
+
+The app is an MCP client of the TodoList Kanban app (the "WorkStream" MCP server). It uses the server's
+`list_boards`, `get_board`, `find_cards` and `create_card` tools over Streamable HTTP, and opens a short session
+per request. The key acts as its owner on the board, so it needs owner or editor rights (a viewer key is refused).
+The proxy variables (`HTTPS_PROXY`, `NO_PROXY`) apply here too.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `KANBAN_MCP_URL` | (off) | MCP endpoint of the Kanban app. Empty hides the Kanban section. |
+| `KANBAN_MCP_TOKEN` | – | API key of the Kanban app. |
+| `KANBAN_MCP_AUTH_HEADER` | `Authorization` | Header for the key. `Authorization` sends `Bearer <key>`; any other header (e.g. `X-API-Key`) sends the key as is. |
+| `KANBAN_BOARD` | (first board) | Board id or title, e.g. `TUIP`. |
+| `KANBAN_COLUMN` | `To do` | Column a new card goes to. |
+| `KANBAN_LABELS` | `Monitoring` | Comma-separated labels for a new card. |
+| `KANBAN_PRIORITY` | `medium` | `none`, `low`, `medium`, `high` or `urgent`. |
+| `KANBAN_CARD_URL` | (none) | Link to a card in the Kanban app (`{id}` = card id), used in the error details. |
+| `KANBAN_TIMEOUT_MS` | `20000` | Timeout per MCP request. |
+
+Assignees picked in the form are requests: the board owner approves them in the Kanban app.
+
 ## Optional: pull errors from CPI directly
 
 The app can replace the n8n workflow that copies CPI error MPLs into the database. It does the same thing:
@@ -208,6 +230,8 @@ All endpoints are under `/api`, require login and return JSON. Errors return `{ 
 | `GET /api/dashboard` | Everything the dashboard shows |
 | `GET /api/errors` | Error list. Filters: `flow`, `status` (FAILED/ESCALATED/RETRY), `category` (id or `__none`), `analysis` (`__none`, `__known` or a status), `q`, `limit` (≤ 500), `offset` |
 | `GET /api/errors/:guid` | One message with category, known error, comments, custom attributes, related messages |
+| `GET /api/errors/:guid/card` | Kanban: the suggested card for this error, the board's columns, labels and team, and the cards that already mention the message ID |
+| `POST /api/errors/:guid/card` | Create a Kanban card: `{ title, description, column, labels, priority, assignees, dueDate }` (all optional; missing fields use the suggestion and the `KANBAN_*` defaults). 409 when Kanban is not configured, 502 when the Kanban server fails |
 | `GET /api/known-errors` | Known errors with hit counts and comments |
 | `POST /api/known-errors` | Create: `{ errormessage, integration_flow_name, rootcause, solutions, status }` |
 | `PUT /api/known-errors/:id` | Update (same body) |
@@ -233,7 +257,7 @@ npm test        # needs TEST_DATABASE_URL (default postgres://cpiapp:cpiapp@loca
 ```
 
 Tests create a temporary schema per run, load `db/schema.sql` and `db/seed-sample.sql`, and drop it afterwards.
-The poller tests use a fake CPI server, so no real tenant is needed.
+The poller tests use a fake CPI server and the Kanban tests a fake MCP server, so no real tenant or board is needed.
 
 ### Project layout
 
@@ -248,6 +272,7 @@ src/
   middleware/        Basic auth, error handling
   cpi/client.js      CPI OData API client (OAuth2 client credentials)
   cpi/certificates.js keystore store/read in the database + expiry classification (Certificates menu)
+  kanban.js          MCP client for the TodoList Kanban board (create a card from an error)
   tickets.js         Ticket pulse queries on the Freshservice tickets table (filled by n8n)
   poller/cpi.js      optional CPI MPL poller
   scripts/           db:init / db:seed, one-off poll
