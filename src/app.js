@@ -10,7 +10,7 @@ const { cpiConfigured } = require('./config');
 const { createClient } = require('./cpi/client');
 const { createCertificateStore } = require('./cpi/certificates');
 const { createTicketStore } = require('./tickets');
-const { createKanban } = require('./kanban');
+const { createKanban, CALLBACK_PATH } = require('./kanban');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const VERSION = require('../package.json').version;
@@ -55,7 +55,7 @@ function securityHeaders(req, res, next) {
 /** Creates the Express application. `pool` is a pg Pool, `config` comes from loadConfig(). */
 function createApp({ pool, config, certificates, tickets, kanban }) {
   if (!tickets) tickets = createTicketStore({ pool, config });
-  if (!kanban) kanban = createKanban(config.kanban);
+  if (!kanban) kanban = createKanban(config.kanban, { pool });
   const app = express();
   if (!certificates) {
     certificates = createCertificateStore({
@@ -83,6 +83,19 @@ function createApp({ pool, config, certificates, tickets, kanban }) {
   app.use(basicAuth(config.auth));
   app.use(express.json({ limit: '100kb' }));
   app.use('/api', apiRouter({ pool, config, certificates, tickets, kanban }));
+  // The Kanban app sends the browser back here after the sign-in ("Connect Kanban board").
+  app.get(CALLBACK_PATH, async (req, res) => {
+    const back = (q) => res.redirect(303, '/?' + new URLSearchParams(q).toString());
+    if (req.query.error) return back({ kanban: 'error', msg: String(req.query.error_description || req.query.error).slice(0, 300) });
+    try {
+      await kanban.finish({ code: String(req.query.code || ''), state: String(req.query.state || '') });
+      console.log(`[kanban] ${req.user || 'user'} connected the Kanban board`);
+      back({ kanban: 'connected' });
+    } catch (err) {
+      console.error('[kanban] sign-in failed:', err.message);
+      back({ kanban: 'error', msg: String(err.message).slice(0, 300) });
+    }
+  });
   app.get('/vendor/chart.umd.js', (req, res) => res.sendFile(CHART_JS, { maxAge: '7d' }));
   // index.html, app.js and styles.css must always match each other, so the browser re-validates them on every
   // load (a cheap 304 when unchanged) instead of keeping an old copy after an upgrade.

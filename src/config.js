@@ -124,8 +124,15 @@ function loadConfig(env = process.env) {
     kanban: {
       // MCP server of the TodoList Kanban app (Streamable HTTP), used to create a card from an error.
       url: (env.KANBAN_MCP_URL || '').trim(),
+      // Login is OAuth by default (someone clicks "Connect Kanban board" once). These are all optional:
+      // where the Kanban app sends the browser back (default: this app's address + /kanban/oauth/callback),
+      redirectUrl: (env.KANBAN_OAUTH_REDIRECT_URL || '').trim(),
+      // a client registered by hand when the server does not allow automatic registration,
+      clientId: (env.KANBAN_OAUTH_CLIENT_ID || '').trim(),
+      clientSecret: (env.KANBAN_OAUTH_CLIENT_SECRET || '').trim(),
+      scope: (env.KANBAN_OAUTH_SCOPE || '').trim(),
+      // or a fixed API key instead of OAuth. Authorization sends "Bearer <token>", another header sends it as is.
       token: (env.KANBAN_MCP_TOKEN || '').trim(),
-      // Header that carries the token: Authorization sends "Bearer <token>", any other header sends the token as is.
       authHeader: (env.KANBAN_MCP_AUTH_HEADER || 'Authorization').trim(),
       board: (env.KANBAN_BOARD || '').trim(),
       column: (env.KANBAN_COLUMN || 'To do').trim(),
@@ -164,6 +171,7 @@ function validateConfig(config) {
   }
   const k = config.kanban;
   if (k.url && !/^https?:[/][/]/i.test(k.url)) problems.push('KANBAN_MCP_URL must start with http:// or https://.');
+  if (k.redirectUrl && !/^https?:[/][/]/i.test(k.redirectUrl)) problems.push('KANBAN_OAUTH_REDIRECT_URL must start with http:// or https://.');
   if (k.cardUrl && !/^https?:[/][/]/i.test(k.cardUrl)) problems.push('KANBAN_CARD_URL must start with http:// or https://.');
   if (!/^[A-Za-z0-9-]+$/.test(k.authHeader)) problems.push('KANBAN_MCP_AUTH_HEADER must be a header name such as Authorization or X-API-Key.');
   if (!['none', 'low', 'medium', 'high', 'urgent'].includes(k.priority)) problems.push('KANBAN_PRIORITY must be none, low, medium, high or urgent.');

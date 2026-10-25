@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('http');
+const crypto = require('crypto');
 const { z } = require('zod');
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
@@ -17,6 +18,8 @@ let cards;
 let lastArgs;
 
 // A small stand-in for the TodoList Kanban (WorkStream) MCP server, with the same tool names and result shape.
+// It accepts the fixed key TOKEN or an OAuth access token it issued itself (dynamic client registration,
+// authorization code + PKCE, refresh tokens), like the real server.
 function fakeKanbanServer() {
   const board = {
     id: 'b1', title: 'TUIP', role: 'owner',
@@ -24,6 +27,7 @@ function fakeKanbanServer() {
     team: [{ id: 't1', name: 'Boripan.C' }],
   };
   const columns = ['Backlog', 'To do', 'In progress', 'Done'];
+  const oauth = { clients: new Map(), codes: new Map(), access: new Set(), refresh: new Set(), n: 0 };
   const json = (v) => ({ content: [{ type: 'text', text: JSON.stringify(v) }] });
   function build() {
     const s = new McpServer({ name: 'WorkStream', version: '1.0.0' });
@@ -47,21 +51,82 @@ function fakeKanbanServer() {
     });
     return s;
   }
+  let base = '';
+  const send = (res, status, body, headers = {}) => { res.writeHead(status, { 'Content-Type': 'application/json', ...headers }).end(JSON.stringify(body)); };
+  const issue = () => {
+    oauth.n += 1;
+    const t = { access_token: `at-${oauth.n}`, refresh_token: `rt-${oauth.n}`, token_type: 'Bearer', expires_in: 3600 };
+    oauth.access.add(t.access_token);
+    oauth.refresh.add(t.refresh_token);
+    return t;
+  };
   const server = http.createServer(async (req, res) => {
-    if (req.headers.authorization !== `Bearer ${TOKEN}`) { res.writeHead(401).end('Unauthorized'); return; }
+    const url = new URL(req.url, base);
     let body = '';
     for await (const chunk of req) body += chunk;
+    if (url.pathname === '/.well-known/oauth-protected-resource/api/mcp' || url.pathname === '/.well-known/oauth-protected-resource') {
+      return send(res, 200, { resource: `${base}/api/mcp`, authorization_servers: [base] });
+    }
+    if (url.pathname === '/.well-known/oauth-authorization-server') {
+      return send(res, 200, {
+        issuer: base, authorization_endpoint: `${base}/authorize`, token_endpoint: `${base}/token`, registration_endpoint: `${base}/register`,
+        response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'],
+        code_challenge_methods_supported: ['S256'], token_endpoint_auth_methods_supported: ['none'],
+      });
+    }
+    if (url.pathname === '/register' && req.method === 'POST') {
+      const meta = JSON.parse(body);
+      const client = { ...meta, client_id: `client-${oauth.clients.size + 1}`, client_id_issued_at: Math.floor(Date.now() / 1000) };
+      oauth.clients.set(client.client_id, client);
+      return send(res, 201, client);
+    }
+    if (url.pathname === '/authorize') {
+      // The user "signs in and approves" at once: back to the app with a code.
+      const p = url.searchParams;
+      const client = oauth.clients.get(p.get('client_id'));
+      if (!client || !client.redirect_uris.includes(p.get('redirect_uri'))) return send(res, 400, { error: 'invalid_request' });
+      const code = `code-${oauth.codes.size + 1}`;
+      oauth.codes.set(code, { challenge: p.get('code_challenge'), client: client.client_id, redirect: p.get('redirect_uri') });
+      const back = new URL(p.get('redirect_uri'));
+      back.searchParams.set('code', code);
+      back.searchParams.set('state', p.get('state'));
+      res.writeHead(302, { Location: back.toString() }).end();
+      return undefined;
+    }
+    if (url.pathname === '/token' && req.method === 'POST') {
+      const p = new URLSearchParams(body);
+      if (p.get('grant_type') === 'authorization_code') {
+        const c = oauth.codes.get(p.get('code'));
+        const challenge = crypto.createHash('sha256').update(p.get('code_verifier') || '').digest('base64url');
+        if (!c || c.challenge !== challenge || c.client !== p.get('client_id') || c.redirect !== p.get('redirect_uri')) return send(res, 400, { error: 'invalid_grant' });
+        oauth.codes.delete(p.get('code'));
+        return send(res, 200, issue());
+      }
+      if (p.get('grant_type') === 'refresh_token' && oauth.refresh.delete(p.get('refresh_token'))) return send(res, 200, issue());
+      return send(res, 400, { error: 'invalid_grant' });
+    }
+    if (url.pathname !== '/api/mcp') return send(res, 404, { error: 'not found' });
+    const bearer = (req.headers.authorization || '').replace(/^Bearer /, '');
+    if (bearer !== TOKEN && !oauth.access.has(bearer)) {
+      res.writeHead(401, { 'WWW-Authenticate': `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource/api/mcp"` }).end();
+      return undefined;
+    }
     // Stateless mode: a new server and transport per request.
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     const s = build();
     res.on('close', () => { transport.close(); s.close(); });
     await s.connect(transport);
     await transport.handleRequest(req, res, body ? JSON.parse(body) : undefined);
+    return undefined;
   });
-  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({
-    url: `http://127.0.0.1:${server.address().port}/mcp`,
-    close: () => new Promise((r) => { server.closeAllConnections(); server.close(r); }),
-  })));
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => {
+    base = `http://127.0.0.1:${server.address().port}`;
+    resolve({
+      url: `${base}/api/mcp`,
+      oauth,
+      close: () => new Promise((r) => { server.closeAllConnections(); server.close(r); }),
+    });
+  }));
 }
 
 test.before(async () => {
@@ -77,16 +142,17 @@ test.after(async () => {
 });
 
 test('meta says whether the Kanban board is connected', async () => {
-  assert.equal((await api.call('GET', '/api/meta')).body.kanban, true);
+  assert.deepEqual((await api.call('GET', '/api/meta')).body.kanban, { enabled: true, connected: true, auth: 'token' });
   const off = await startApp(db.pool);
   try {
-    assert.equal((await off.call('GET', '/api/meta')).body.kanban, false);
+    assert.deepEqual((await off.call('GET', '/api/meta')).body.kanban, { enabled: false, connected: false });
     const info = await off.call('GET', '/api/errors/MPL-0001/card');
     assert.equal(info.body.enabled, false);
     assert.match(info.body.suggested.title, /INT406_TUE_IOT_COMB/);
     const r = await off.call('POST', '/api/errors/MPL-0001/card', {});
     assert.equal(r.status, 409);
     assert.match(r.body.error, /KANBAN_MCP_URL/);
+    assert.equal((await off.call('POST', '/api/kanban/connect')).status, 409);
   } finally {
     await off.close();
   }
@@ -169,4 +235,92 @@ test('validates the Kanban settings', () => {
   assert.match(validateConfig(loadConfig({ ...base, KANBAN_MCP_URL: 'kanban.example' })).join(), /KANBAN_MCP_URL/);
   assert.match(validateConfig(loadConfig({ ...base, KANBAN_PRIORITY: 'asap' })).join(), /KANBAN_PRIORITY/);
   assert.deepEqual(loadConfig({ ...base, KANBAN_LABELS: '' }).kanban.labels, []);
+});
+
+test('OAuth: connect once, create cards, refresh the token, disconnect', async () => {
+  const app = await startApp(db.pool, { KANBAN_MCP_URL: mcp.url, KANBAN_BOARD: 'TUIP' });
+  const authz = 'Basic ' + Buffer.from('alice:wonderland').toString('base64');
+  try {
+    assert.deepEqual((await app.call('GET', '/api/meta')).body.kanban, { enabled: true, connected: false, auth: 'oauth', connectedBy: null, connectedAt: null });
+    const before = await app.call('GET', '/api/errors/MPL-0002/card');
+    assert.equal(before.body.connected, false);
+    assert.match(before.body.suggested.title, /INT401/);
+    const blocked = await app.call('POST', '/api/errors/MPL-0002/card', {});
+    assert.equal(blocked.status, 409);
+    assert.equal(blocked.body.connect, true);
+
+    // Start the sign-in: the app registers itself and returns the Kanban sign-in page.
+    const start = await app.call('POST', '/api/kanban/connect');
+    assert.equal(start.status, 200);
+    const signIn = new URL(start.body.url);
+    assert.equal(signIn.pathname, '/authorize');
+    assert.equal(signIn.searchParams.get('redirect_uri'), `${app.base}/kanban/oauth/callback`);
+    assert.equal(signIn.searchParams.get('code_challenge_method'), 'S256');
+
+    // The Kanban app sends the browser back with a code.
+    const approved = await fetch(signIn, { redirect: 'manual' });
+    assert.equal(approved.status, 302);
+    const callback = new URL(approved.headers.get('location'));
+
+    // A forged state is refused.
+    const forged = new URL(callback);
+    forged.searchParams.set('state', 'not-the-state');
+    const bad = await fetch(forged, { redirect: 'manual', headers: { Authorization: authz } });
+    assert.match(bad.headers.get('location'), /kanban=error/);
+
+    // Start again and finish properly.
+    const again = new URL((await app.call('POST', '/api/kanban/connect')).body.url);
+    const back = new URL((await fetch(again, { redirect: 'manual' })).headers.get('location'));
+    const done = await fetch(back, { redirect: 'manual', headers: { Authorization: authz } });
+    assert.equal(done.status, 303);
+    assert.equal(done.headers.get('location'), '/?kanban=connected');
+    // The same code cannot be used twice.
+    assert.match((await fetch(back, { redirect: 'manual', headers: { Authorization: authz } })).headers.get('location'), /kanban=error/);
+
+    const st = (await app.call('GET', '/api/kanban/status')).body;
+    assert.equal(st.connected, true);
+    assert.equal(st.connectedBy, 'alice');
+
+    const info = await app.call('GET', '/api/errors/MPL-0002/card');
+    assert.equal(info.body.board.title, 'TUIP');
+    const created = await app.call('POST', '/api/errors/MPL-0002/card', {});
+    assert.equal(created.status, 201);
+
+    // The access token expires: the app refreshes it by itself.
+    mcp.oauth.access.clear();
+    const refreshed = await app.call('POST', '/api/errors/MPL-0002/card', { title: 'after refresh' });
+    assert.equal(refreshed.status, 201);
+    assert.equal(lastArgs.title, 'after refresh');
+
+    // Access and refresh tokens both revoked: the user is asked to connect again.
+    mcp.oauth.access.clear();
+    mcp.oauth.refresh.clear();
+    const revoked = await app.call('GET', '/api/errors/MPL-0002/card');
+    assert.equal(revoked.status, 409);
+    assert.equal(revoked.body.connect, true);
+    assert.equal((await app.call('GET', '/api/kanban/status')).body.connected, false);
+
+    // Connect again, then disconnect.
+    const third = new URL((await app.call('POST', '/api/kanban/connect')).body.url);
+    await fetch(new URL((await fetch(third, { redirect: 'manual' })).headers.get('location')), { redirect: 'manual', headers: { Authorization: authz } });
+    assert.equal((await app.call('GET', '/api/kanban/status')).body.connected, true);
+    const off = await app.call('POST', '/api/kanban/disconnect');
+    assert.equal(off.body.connected, false);
+    assert.equal((await app.call('POST', '/api/errors/MPL-0002/card', {})).status, 409);
+  } finally {
+    await app.close();
+  }
+});
+
+test('OAuth: the sign-in page reporting an error comes back as a message', async () => {
+  const app = await startApp(db.pool, { KANBAN_MCP_URL: mcp.url });
+  try {
+    const r = await fetch(`${app.base}/kanban/oauth/callback?error=access_denied&error_description=User+said+no`, {
+      redirect: 'manual', headers: { Authorization: 'Basic ' + Buffer.from('alice:wonderland').toString('base64') },
+    });
+    assert.equal(r.status, 303);
+    assert.match(r.headers.get('location'), /kanban=error&msg=User\+said\+no/);
+  } finally {
+    await app.close();
+  }
 });

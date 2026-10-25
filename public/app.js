@@ -28,7 +28,7 @@ function request(method, path, body) {
   if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   return fetch(path, opts).then(function (r) {
     return r.json().catch(function () { return {}; }).then(function (j) {
-      if (!r.ok) throw new Error(j.error || ('Server returned HTTP ' + r.status));
+      if (!r.ok) { var e = new Error(j.error || ('Server returned HTTP ' + r.status)); e.connect = !!j.connect; throw e; }
       return j;
     });
   });
@@ -273,7 +273,7 @@ function openDetail(guid) {
       '</div>' +
       '<h3>Category</h3>' + (d.category ? '<div>' + pill(d.category.category_name, 'cat') + ' <span class="muted mono">' + esc(d.category.category_expression) + '</span></div>' : '<div class="row"><span class="muted">Uncategorized</span><button class="btn sm" id="d-cat">Create a category from this error</button></div>') +
       '<h3>Root cause &amp; solution</h3>' + (a ? analysisBlock(a) : '<div class="row"><span class="muted">No known error matches this message yet.</span><button class="btn sm pri" id="d-an">Record root cause &amp; solution</button></div>') +
-      (S.meta.kanban ? '<h3>Kanban</h3><div class="row" id="d-kb"><span class="muted small">Checking the board…</span></div>' : '') +
+      (kanbanOn() ? '<h3>Kanban</h3><div class="row" id="d-kb"><span class="muted small">Checking the board…</span></div>' : '') +
       '<h3>Error text</h3><pre class="err">' + esc(d.errormsg || '(no error text returned by CPI)') + '</pre>' +
       (d.attributes.length ? '<h3>Custom header properties</h3><table><tbody>' + d.attributes.map(function (x) { return '<tr><td class="muted">' + esc(x.name) + '</td><td class="mono">' + esc(x.value) + '</td></tr>'; }).join('') + '</tbody></table>' : '') +
       (d.related.length ? '<h3>Other messages with the same correlation ID</h3><table><tbody>' + d.related.map(function (r) { return '<tr class="click" data-g="' + esc(r.message_guid) + '"><td class="nowrap">' + dt(r.log_start) + '</td><td>' + esc(r.flow) + '</td><td>' + pill(r.status) + '</td></tr>'; }).join('') + '</tbody></table>' : '');
@@ -282,21 +282,46 @@ function openDetail(guid) {
     var da = $('#d-an'); if (da) da.onclick = function () { openAnalysis({ integration_flow_name: m.flow, errormessage: suggestPattern(d.errormsg), status: 'Open' }); };
     var de = $('#d-edit'); if (de) de.onclick = function () { openAnalysis(a); };
     $$('#dr tr[data-g]').forEach(function (t) { t.onclick = function () { openDetail(t.dataset.g); }; });
-    if (S.meta.kanban) loadCardInfo(guid);
+    if (kanbanOn()) loadCardInfo(guid);
   }).catch(fail);
 }
 
 /* ---------- Kanban card from an error (TodoList Kanban over MCP) ---------- */
 function cardLink(k, c) { return k.cardUrl ? '<a href="' + esc(k.cardUrl.split('{id}').join(encodeURIComponent(c.id))) + '" target="_blank" rel="noopener">' + esc(c.title) + ' ↗</a>' : esc(c.title); }
+function kanbanOn() { return !!(S.meta.kanban && S.meta.kanban.enabled); }
+function connectKanban(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Opening sign-in…'; }
+  request('POST', 'api/kanban/connect').then(function (r) { window.location.href = r.url; })
+    .catch(function (e) { if (btn) { btn.disabled = false; btn.textContent = 'Connect Kanban board'; } fail(e); });
+}
+function kanbanConnectBox(msg) {
+  return '<div class="row" id="d-kb"><span class="muted small">' + esc(msg) + '</span><button class="btn sm pri" id="d-kconn">Connect Kanban board</button></div>';
+}
+function bindKanbanConnect() { var b = $('#d-kconn'); if (b) b.onclick = function () { connectKanban(b); }; }
 function loadCardInfo(guid) {
   get('api/errors/' + encodeURIComponent(guid) + '/card').then(function (k) {
     var box = $('#d-kb'); if (!box) return;
+    if (!k.connected) {
+      box.outerHTML = kanbanConnectBox('Sign in to the Kanban app once to create cards from errors.');
+      bindKanbanConnect();
+      return;
+    }
     var ex = k.existing || [];
+    var who = S.meta.kanban && S.meta.kanban.auth === 'oauth'
+      ? '<div class="muted small" style="margin-top:6px">Cards are created as the Kanban account connected' + (S.meta.kanban.connectedBy ? ' by ' + esc(S.meta.kanban.connectedBy) : '') + '. <a href="#" id="d-kdis">Disconnect</a></div>' : '';
     box.outerHTML = '<div id="d-kb">' + (ex.length ? '<table><tbody>' + ex.map(function (c) { return '<tr><td>' + cardLink(k, c) + '</td><td class="nowrap">' + pill(c.column, 'cat') + '</td><td class="muted small nowrap">' + esc(dt(c.createdAt)) + '</td></tr>'; }).join('') + '</tbody></table>' : '') +
-      '<div class="row"><span class="muted small">' + (ex.length ? ex.length + ' card' + (ex.length > 1 ? 's' : '') + ' on ' : 'No card yet on ') + esc(k.board.title) + '.</span><button class="btn sm' + (ex.length ? '' : ' pri') + '" id="d-card">' + (ex.length ? 'Create another card' : 'Create Kanban card') + '</button></div></div>';
+      '<div class="row"><span class="muted small">' + (ex.length ? ex.length + ' card' + (ex.length > 1 ? 's' : '') + ' on ' : 'No card yet on ') + esc(k.board.title) + '.</span><button class="btn sm' + (ex.length ? '' : ' pri') + '" id="d-card">' + (ex.length ? 'Create another card' : 'Create Kanban card') + '</button></div>' + who + '</div>';
     $('#d-card').onclick = function () { openCard(guid, k); };
+    var dis = $('#d-kdis');
+    if (dis) dis.onclick = function (ev) {
+      ev.preventDefault();
+      if (!confirm('Disconnect the Kanban board? Nobody can create cards until someone connects it again.')) return;
+      request('POST', 'api/kanban/disconnect').then(function (st) { S.meta.kanban = st; toast('Kanban board disconnected'); openDetail(guid); }).catch(fail);
+    };
   }).catch(function (e) {
-    var box = $('#d-kb'); if (box) box.innerHTML = '<span class="bad small">' + esc(e.message) + '</span>';
+    var box = $('#d-kb'); if (!box) return;
+    if (e.connect) { box.outerHTML = kanbanConnectBox(e.message); bindKanbanConnect(); return; }
+    box.innerHTML = '<span class="bad small">' + esc(e.message) + '</span>';
   });
 }
 function openCard(guid, k) {
@@ -331,7 +356,10 @@ function openCard(guid, k) {
     var b = this; b.disabled = true; b.textContent = 'Creating…';
     request('POST', 'api/errors/' + encodeURIComponent(guid) + '/card', p).then(function (c) {
       toast('Card created in ' + (c.column || p.column)); openDetail(guid);
-    }).catch(function (e) { b.disabled = false; b.textContent = 'Create card'; fail(e); });
+    }).catch(function (e) {
+      b.disabled = false; b.textContent = 'Create card'; fail(e);
+      if (e.connect) openDetail(guid);
+    });
   };
 }
 function analysisBlock(a) {
@@ -887,4 +915,11 @@ $$('#tabs button').forEach(function (b) { b.onclick = function () { show(b.datas
 try { var savedRange = localStorage.getItem('cpiec-range'); if (savedRange) $('#range').value = savedRange; } catch (e) {}
 $('#range').onchange = function () { try { localStorage.setItem('cpiec-range', this.value); } catch (e) {} S.ef.offset = 0; load(); };
 $('#refresh').onclick = refreshAll;
+// Back from the Kanban sign-in (see /kanban/oauth/callback).
+(function () {
+  var q = new URLSearchParams(window.location.search), k = q.get('kanban');
+  if (!k) return;
+  history.replaceState(null, '', window.location.pathname);
+  setTimeout(function () { if (k === 'connected') toast('Kanban board connected'); else toast('Kanban sign-in failed: ' + (q.get('msg') || 'unknown error'), true); }, 300);
+})();
 loadMeta().then(function () { return show('dash'); }).catch(fail);

@@ -121,3 +121,13 @@ CREATE TABLE IF NOT EXISTS cpi_keystore_sync (
   entries   integer NOT NULL,
   removed   integer NOT NULL
 );
+
+-- ---------------------------------------------------------------------------------------------
+-- Kanban sign-in (OAuth) for creating cards from errors. The app creates this table by itself the
+-- first time it is needed; it holds the registered client and the tokens of the connected account.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS kanban_oauth (
+  id         text PRIMARY KEY,
+  data       jsonb NOT NULL DEFAULT '{}',
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
