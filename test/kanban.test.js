@@ -344,11 +344,27 @@ test('a new known error creates its Kanban card by itself', async () => {
   assert.deepEqual(lastArgs.labels, ['Monitoring']);
   assert.equal(lastArgs.assignees, undefined);
 
-  // Editing the known error does not create another card.
+  // Editing the known error does not create another card, neither in another status nor saved as Open again.
   const n = cards.length;
   const u = await api.call('PUT', `/api/known-errors/${id}`, { ...KNOWN, status: 'In Progress' });
   assert.equal(u.status, 200);
+  assert.equal(u.body.kanban, undefined);
+  const again = await api.call('PUT', `/api/known-errors/${id}`, { ...KNOWN, status: 'Open' });
+  assert.equal(again.body.kanban.existed, true);
   assert.equal(cards.length, n);
+});
+
+test('only status Open creates a card: a known error saved as Resolved gets one when set back to Open', async () => {
+  const n = cards.length;
+  const r = await api.call('POST', '/api/known-errors', { ...KNOWN, status: 'Resolved' });
+  assert.equal(r.status, 201);
+  assert.equal(r.body.kanban, undefined);
+  assert.equal(cards.length, n);
+  const reopened = await api.call('PUT', `/api/known-errors/${r.body.ea_id}`, { ...KNOWN, status: 'Open' });
+  assert.equal(reopened.status, 200);
+  assert.equal(reopened.body.kanban.existed, false);
+  assert.equal(cards.length, n + 1);
+  assert.match(lastArgs.description, new RegExp(`\\[CPI-KE-${r.body.ea_id}\\]`));
 });
 
 test('a known error that already has a card is not filed twice', async () => {
