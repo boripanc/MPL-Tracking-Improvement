@@ -48,6 +48,24 @@ npm start                   # http://localhost:3000
 
 Sign in with one of the `APP_USERS` accounts.
 
+### Login
+
+Every page and API call needs a signed-in user; only `/healthz` is open. Opening the app without a session goes to
+the **login page**; after signing in, the browser returns to the page it asked for. The header shows the user and a
+**Sign out** button.
+
+A session ends, and the user has to sign in again, when:
+
+- nothing was done for `SESSION_IDLE_MINUTES` (default 60),
+- `SESSION_MAX_HOURS` have passed since signing in (default 12), even while working,
+- the user clicks **Sign out**,
+- the user's password is changed in `APP_USERS` (or the user is removed),
+- the server restarts, unless `SESSION_SECRET` is set.
+
+Ten wrong passwords from one address block the login for 15 minutes. Scripts can still send HTTP Basic credentials
+(`curl -u user:password …`) with each request; the browser is never asked for them, because a browser keeps Basic
+credentials until it is closed and cannot sign out.
+
 ### Try it locally with sample data
 
 With Docker:
@@ -77,7 +95,10 @@ All settings are environment variables (a `.env` file is read automatically). Se
 | `DB_SCHEMA` | `public` | Schema that holds the tables. |
 | `PG_POOL_MAX` | `10` | Max database connections. |
 | `APP_USERS` | – | **Required** unless auth is disabled. Comma-separated `user:password` pairs. |
-| `AUTH_DISABLED` | `false` | Local development only. |
+| `AUTH_DISABLED` | `false` | Local development only: no login at all. |
+| `SESSION_SECRET` | (random per start) | Key that signs the session cookie. Set it so a restart does not sign everyone out. |
+| `SESSION_IDLE_MINUTES` | `60` | Sign out after this long without activity. |
+| `SESSION_MAX_HOURS` | `12` | Sign in again after this long in any case. |
 | `PORT` / `HOST` | `3000` / `0.0.0.0` | Where the server listens. |
 | `TRUST_PROXY` | (off) | Set to `1` behind a reverse proxy / load balancer. |
 | `DEFAULT_TZ` | `Asia/Bangkok` | Time zone for chart buckets if the browser doesn't send one. |
@@ -173,7 +194,14 @@ per request. The proxy variables (`HTTPS_PROXY`, `NO_PROXY`) apply here too.
 The app registers itself with the Kanban server (dynamic client registration), uses PKCE, keeps the client and the
 tokens in the `kanban_oauth` table (created automatically) and refreshes the access token by itself. Cards are
 created as the account that connected, for everyone who uses this app. **Disconnect** (in the Kanban section)
-forgets the tokens. If the tokens are revoked, the section asks to connect again.
+forgets the tokens. If the tokens are revoked or refused (401/403), the app drops them and the section asks to
+connect again.
+
+**Sign in again** (next to Disconnect) forces a fresh sign-in: it removes the saved tokens and the client
+registration at once, registers the app again and opens the Kanban login page with `prompt=login`, so the login
+form is shown even when the browser is still signed in to WorkStream. Use it to switch to another Kanban account or
+when the connection looks stuck. Until the new sign-in is finished, no cards can be created (automatic cards say why).
+API: `POST /api/kanban/connect` with `{"force": true}`.
 
 The callback address is the address you opened the app with plus `/kanban/oauth/callback`. The Kanban server only
 accepts **https** callbacks (or http on localhost):

@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const { apiRouter } = require('./routes/api');
-const { basicAuth } = require('./middleware/auth');
+const { requireLogin } = require('./middleware/auth');
 const { errorHandler } = require('./middleware/errors');
 const { cpiConfigured } = require('./config');
 const { createClient } = require('./cpi/client');
@@ -80,7 +80,8 @@ function createApp({ pool, config, certificates, tickets, kanban }) {
     }
   });
 
-  app.use(basicAuth(config.auth));
+  // Everything below needs a signed-in user (login page, session cookie; Basic credentials for scripts).
+  app.use(requireLogin(config.auth));
   app.use(express.json({ limit: '100kb' }));
   app.use('/api', apiRouter({ pool, config, certificates, tickets, kanban }));
   // The Kanban app sends the browser back here after the sign-in ("Connect Kanban board").

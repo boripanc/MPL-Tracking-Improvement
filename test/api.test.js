@@ -17,16 +17,134 @@ test.after(async () => {
 });
 
 test('requires login for the app and the API, but not for /healthz', async () => {
-  for (const url of ['/', '/api/meta']) {
-    const r = await api.call('GET', url, undefined, { Authorization: '' });
-    assert.equal(r.status, 401);
-    assert.match(r.headers.get('www-authenticate'), /^Basic/);
+  // The page sends the browser to the login form; the API answers 401. The browser is never asked for Basic
+  // credentials (no WWW-Authenticate), so it cannot keep them after "Sign out".
+  for (const [url, to] of [['/?tab=errors', '/login?next=%2F%3Ftab%3Derrors'], ['/app.js', '/login?next=%2Fapp.js']]) {
+    const page = await fetch(api.base + url, { redirect: 'manual' });
+    assert.equal(page.status, 303, url);
+    assert.equal(page.headers.get('location'), to);
+    assert.equal(page.headers.get('www-authenticate'), null);
   }
+  const apiCall = await api.call('GET', '/api/meta', undefined, { Authorization: '' });
+  assert.equal(apiCall.status, 401);
+  assert.equal(apiCall.headers.get('www-authenticate'), null);
+  assert.equal((await api.call('POST', '/api/known-errors', {}, { Authorization: '' })).status, 401);
   const wrong = await api.call('GET', '/api/meta', undefined, { Authorization: 'Basic ' + Buffer.from('alice:nope').toString('base64') });
   assert.equal(wrong.status, 401);
+  assert.equal(wrong.body.login, true);
+  // Scripts can still send Basic credentials.
+  assert.equal((await api.call('GET', '/api/meta')).body.user, 'alice');
   const health = await api.call('GET', '/healthz', undefined, { Authorization: '' });
   assert.equal(health.status, 200);
   assert.equal(health.body.ok, true);
+});
+
+// Browser-like client: no Basic header, keeps the session cookie.
+function browser(base) {
+  let cookie = '';
+  async function go(method, url, { form, json } = {}) {
+    const headers = { ...(cookie ? { Cookie: cookie } : {}) };
+    let body;
+    if (form) { headers['Content-Type'] = 'application/x-www-form-urlencoded'; body = new URLSearchParams(form).toString(); }
+    if (json) { headers['Content-Type'] = 'application/json'; body = JSON.stringify(json); }
+    const res = await fetch(base + url, { method, headers, body, redirect: 'manual' });
+    for (const c of res.headers.getSetCookie()) {
+      const [pair, ...attrs] = c.split(';');
+      cookie = /max-age=0/i.test(attrs.join(';')) ? '' : pair;
+    }
+    const text = await res.text();
+    return { status: res.status, location: res.headers.get('location'), text, setCookie: res.headers.getSetCookie() };
+  }
+  return { go, get cookie() { return cookie; }, set cookie(v) { cookie = v; } };
+}
+
+test('login page: sign in, use the app, sign out', async () => {
+  const b = browser(api.base);
+  const form = await b.go('GET', '/login?next=%2F%3Ftab%3Dcerts');
+  assert.equal(form.status, 200);
+  assert.match(form.text, /<form method="post" action="\/login">/);
+  assert.match(form.text, /value="\/\?tab=certs"/);
+  assert.equal((await b.go('GET', '/styles.css')).status, 200, 'the login page can load its styles');
+
+  const bad = await b.go('POST', '/login', { form: { user: 'alice', password: 'nope', next: '/' } });
+  assert.equal(bad.status, 401);
+  assert.match(bad.text, /Wrong user or password/);
+  assert.equal(b.cookie, '');
+
+  const ok = await b.go('POST', '/login', { form: { user: 'alice', password: 'wonderland', next: '/?tab=certs' } });
+  assert.equal(ok.status, 303);
+  assert.equal(ok.location, '/?tab=certs');
+  assert.match(ok.setCookie[0], /HttpOnly; SameSite=Lax/);
+  assert.equal((await b.go('GET', '/')).status, 200);
+  const meta = await b.go('GET', '/api/meta');
+  assert.equal(JSON.parse(meta.text).user, 'alice');
+  assert.equal((await b.go('GET', '/login')).location, '/', 'signed in: the login page goes to the app');
+
+  // A tampered cookie is refused.
+  const good = b.cookie;
+  b.cookie = good.slice(0, -2) + (good.endsWith('AA') ? 'BB' : 'AA');
+  assert.equal((await b.go('GET', '/api/meta')).status, 401);
+  b.cookie = good;
+
+  // GET /logout does nothing (no sign-out from a link on another site); POST signs out.
+  assert.equal((await b.go('GET', '/logout')).location, '/');
+  assert.equal((await b.go('GET', '/api/meta')).status, 200);
+  const out = await b.go('POST', '/logout');
+  assert.equal(out.location, '/login?out=1');
+  assert.equal(b.cookie, '');
+  assert.equal((await b.go('GET', '/api/meta')).status, 401);
+});
+
+test('login: never sends the browser to another site after signing in', async () => {
+  const b = browser(api.base);
+  for (const next of ['https://evil.example/', '//evil.example/', '/\\evil.example', '/login']) {
+    const r = await b.go('POST', '/login', { form: { user: 'alice', password: 'wonderland', next } });
+    assert.equal(r.location, '/', next);
+  }
+});
+
+test('sessions end after the idle time, and when the password changes', async () => {
+  const app = await startApp(db.pool, { SESSION_SECRET: 's3cret', SESSION_IDLE_MINUTES: '1' });
+  try {
+    const b = browser(app.base);
+    await b.go('POST', '/login', { form: { user: 'alice', password: 'wonderland' } });
+    assert.equal((await b.go('GET', '/api/meta')).status, 200);
+    const realNow = Date.now;
+    try {
+      Date.now = () => realNow() + 2 * 60 * 1000;
+      const late = await b.go('GET', '/?tab=errors');
+      assert.equal(late.status, 303);
+      assert.match(late.location, /^\/login\?next=.*&expired=1$/);
+    } finally {
+      Date.now = realNow;
+    }
+
+    // Same secret, new password: the old session is refused.
+    await b.go('POST', '/login', { form: { user: 'alice', password: 'wonderland' } });
+    const kept = b.cookie;
+    const changed = await startApp(db.pool, { SESSION_SECRET: 's3cret', APP_USERS: 'alice:new-password' });
+    try {
+      const c = browser(changed.base);
+      c.cookie = kept;
+      assert.equal((await c.go('GET', '/api/meta')).status, 401);
+    } finally {
+      await changed.close();
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+test('too many wrong passwords block the sign-in for a while', async () => {
+  const app = await startApp(db.pool);
+  try {
+    const b = browser(app.base);
+    for (let i = 0; i < 10; i += 1) await b.go('POST', '/login', { form: { user: 'alice', password: 'x' } });
+    const blocked = await b.go('POST', '/login', { form: { user: 'alice', password: 'wonderland' } });
+    assert.equal(blocked.status, 429);
+  } finally {
+    await app.close();
+  }
 });
 
 test('serves the page, script, styles and Chart.js', async () => {

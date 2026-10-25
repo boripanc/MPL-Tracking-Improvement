@@ -447,6 +447,48 @@ test('OAuth from an app on plain http: the sign-in ends on localhost and the add
   }
 });
 
+test('OAuth: "Sign in again" drops the old login, registers afresh and always shows the login page', async () => {
+  const app = await startApp(db.pool, { KANBAN_MCP_URL: mcp.url });
+  const authz = 'Basic ' + Buffer.from('alice:wonderland').toString('base64');
+  const signIn = async (body) => {
+    const r = await app.call('POST', '/api/kanban/connect', body);
+    assert.equal(r.status, 200);
+    const url = new URL(r.body.url);
+    const back = new URL((await fetch(url, { redirect: 'manual' })).headers.get('location'));
+    await fetch(back, { redirect: 'manual', headers: { Authorization: authz } });
+    return url;
+  };
+  try {
+    const first = await signIn();
+    assert.equal(first.searchParams.get('prompt'), null);
+    assert.equal((await app.call('GET', '/api/kanban/status')).body.connected, true);
+    const oldTokens = new Set(mcp.oauth.access);
+
+    // Forced: the saved login is gone at once, before the new sign-in is finished.
+    const clients = mcp.oauth.clients.size;
+    const start = await app.call('POST', '/api/kanban/connect', { force: true });
+    assert.equal(start.status, 200);
+    assert.equal(start.body.force, true);
+    const forced = new URL(start.body.url);
+    assert.equal(forced.searchParams.get('prompt'), 'login');
+    assert.equal(mcp.oauth.clients.size, clients + 1, 'a new client is registered');
+    const st = (await app.call('GET', '/api/kanban/status')).body;
+    assert.equal(st.connected, false);
+    assert.equal(st.connectedBy, null);
+    assert.equal((await app.call('POST', '/api/errors/MPL-0002/card', {})).body.connect, true);
+
+    // Finishing it connects with new tokens.
+    const back = new URL((await fetch(forced, { redirect: 'manual' })).headers.get('location'));
+    assert.equal((await fetch(back, { redirect: 'manual', headers: { Authorization: authz } })).headers.get('location'), '/?kanban=connected');
+    assert.equal((await app.call('GET', '/api/kanban/status')).body.connectedBy, 'alice');
+    assert.equal((await app.call('POST', '/api/errors/MPL-0002/card', { title: 'after forced sign-in' })).status, 201);
+    const row = (await db.pool.query("SELECT data FROM kanban_oauth WHERE id = 'default'")).rows[0].data;
+    assert.ok(!oldTokens.has(row.tokens.access_token), 'the old access token is not reused');
+  } finally {
+    await app.close();
+  }
+});
+
 test('OAuth behind an https proxy uses the public https address', async () => {
   const app = await startApp(db.pool, { KANBAN_MCP_URL: mcp.url, TRUST_PROXY: '1' });
   const fixed = await startApp(db.pool, { KANBAN_MCP_URL: mcp.url, KANBAN_OAUTH_REDIRECT_URL: 'https://cpi.example.com/kanban/oauth/callback' });

@@ -97,6 +97,10 @@ function loadConfig(env = process.env) {
       users: parseUsers(env.APP_USERS),
       disabled: bool(env.AUTH_DISABLED, false),
       realm: 'CPI Error Center',
+      // Sessions after signing in on /login. Without SESSION_SECRET a restart signs everyone out.
+      sessionSecret: (env.SESSION_SECRET || '').trim(),
+      idleMinutes: Math.max(1, int(env.SESSION_IDLE_MINUTES, 60)),
+      maxHours: Math.max(1, int(env.SESSION_MAX_HOURS, 12)),
     },
     db: {
       url: env.DATABASE_URL || '',
