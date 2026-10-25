@@ -434,3 +434,18 @@ test('OAuth behind an https proxy uses the public https address', async () => {
     await fixed.close();
   }
 });
+
+test('OAuth: a callback address on the Kanban server itself is refused with a clear message', async () => {
+  const wrong = await startApp(db.pool, { KANBAN_MCP_URL: mcp.url, KANBAN_OAUTH_REDIRECT_URL: `${new URL(mcp.url).origin}/kanban/oauth/callback` });
+  const badPath = await startApp(db.pool, { KANBAN_MCP_URL: mcp.url, KANBAN_OAUTH_REDIRECT_URL: 'https://cpi.example.com/' });
+  try {
+    for (const app of [wrong, badPath]) {
+      const r = await app.call('POST', '/api/kanban/connect');
+      assert.equal(r.status, 409);
+      assert.match(r.body.error, /KANBAN_OAUTH_REDIRECT_URL must be this app's own address/);
+    }
+  } finally {
+    await wrong.close();
+    await badPath.close();
+  }
+});
