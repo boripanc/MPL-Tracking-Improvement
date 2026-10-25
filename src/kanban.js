@@ -167,6 +167,13 @@ function createKanban(cfg, { pool, env = process.env } = {}) {
     // The Kanban server only takes an https callback (or http on localhost). When this app is opened over plain
     // http on another host and no KANBAN_OAUTH_REDIRECT_URL is set, the sign-in returns to http://localhost and
     // the user pastes that address back into the app ("paste" mode).
+    if (cfg.redirectUrl) {
+      const r = new URL(cfg.redirectUrl);
+      if (r.host === new URL(cfg.url).host || r.pathname !== CALLBACK_PATH) {
+        throw new KanbanError(`KANBAN_OAUTH_REDIRECT_URL must be this app's own address ending in ${CALLBACK_PATH}, `
+          + `not the Kanban server's (it is ${cfg.redirectUrl}). Clear it to use the copy-and-paste sign-in, then restart.`, 409);
+      }
+    }
     let uri = cfg.redirectUrl || redirectUri;
     const paste = !cfg.redirectUrl && !callbackAllowed(uri);
     if (paste) uri = `http://localhost${CALLBACK_PATH}`;

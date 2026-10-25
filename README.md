@@ -179,7 +179,8 @@ The callback address is the address you opened the app with plus `/kanban/oauth/
 accepts **https** callbacks (or http on localhost):
 
 - **App on https** (directly or behind an https reverse proxy): set `TRUST_PROXY=1` behind the proxy, or set
-  `KANBAN_OAUTH_REDIRECT_URL=https://<public address>/kanban/oauth/callback`. The browser comes straight back.
+  `KANBAN_OAUTH_REDIRECT_URL=https://<this app's public address>/kanban/oauth/callback`. The browser comes straight
+  back. This is the CPI Error Center's address, never the Kanban server's; the app refuses the Kanban server's.
 - **App on plain http** (e.g. `http://server:3000`): the sign-in returns to `http://localhost/kanban/oauth/callback`,
   which does not load. (The WorkStream site may rewrite it to `https://workstream.teddybiere.info/kanban/oauth/callback?…`;
   that address works the same.) The app shows a box: copy that address from the browser bar, paste it, click
