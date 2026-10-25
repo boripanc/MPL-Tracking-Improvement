@@ -279,7 +279,7 @@ function openDetail(guid) {
       (d.related.length ? '<h3>Other messages with the same correlation ID</h3><table><tbody>' + d.related.map(function (r) { return '<tr class="click" data-g="' + esc(r.message_guid) + '"><td class="nowrap">' + dt(r.log_start) + '</td><td>' + esc(r.flow) + '</td><td>' + pill(r.status) + '</td></tr>'; }).join('') + '</tbody></table>' : '');
     openDrawer(h);
     var dc = $('#d-cat'); if (dc) dc.onclick = function () { openCategory({ category_expression: suggestRegex(d.errormsg) }); };
-    var da = $('#d-an'); if (da) da.onclick = function () { openAnalysis({ integration_flow_name: m.flow, errormessage: suggestPattern(d.errormsg), status: 'Open' }); };
+    var da = $('#d-an'); if (da) da.onclick = function () { openAnalysis({ integration_flow_name: m.flow, errormessage: suggestPattern(d.errormsg), status: 'Open', message_guid: m.message_guid }); };
     var de = $('#d-edit'); if (de) de.onclick = function () { openAnalysis(a); };
     $$('#dr tr[data-g]').forEach(function (t) { t.onclick = function () { openDetail(t.dataset.g); }; });
     if (kanbanOn()) loadCardInfo(guid);
@@ -414,6 +414,7 @@ function openAnalysis(a) {
     '<label class="f" for="a-rc">Root cause</label><textarea id="a-rc" rows="3" class="txt">' + esc(a.rootcause || '') + '</textarea>' +
     '<label class="f" for="a-sol">Solution</label><textarea id="a-sol" rows="4" class="txt">' + esc(a.solutions || '') + '</textarea>' +
     '<label class="f" for="a-st">Status</label><select id="a-st">' + opts(STATUSES.map(function (s) { return [s, s]; }), a.status || 'Open') + '</select>' +
+    (isNew && S.meta.kanban && S.meta.kanban.enabled && S.meta.kanban.autoCard ? '<p class="muted small">Saving also creates a card on the Kanban board.</p>' : '') +
     '<div class="row mt"><button class="btn pri" id="a-save">Save</button>' + (isNew ? '' : '<button class="btn danger" id="a-del">Delete</button>') + '<span class="sp"></span><button class="btn" data-close>Cancel</button></div>' +
     (isNew ? '' : '<h3>Comments</h3><div id="a-cm">' + commentsHtml(a.comments || []) + '</div><textarea id="a-nc" rows="2" class="txt" placeholder="Add a comment (investigation notes, who is working on it)"></textarea><div class="row" style="margin-top:6px"><button class="btn sm" id="a-addc">Add comment</button></div>'));
   $('#a-test').onclick = function () { testMatch('like', $('#a-pat').value, $('#a-flow').value, '#a-res'); };
@@ -421,7 +422,14 @@ function openAnalysis(a) {
     var p = { integration_flow_name: $('#a-flow').value.trim(), errormessage: $('#a-pat').value.trim(), rootcause: $('#a-rc').value.trim(), solutions: $('#a-sol').value.trim(), status: $('#a-st').value };
     if (p.errormessage.length < 10) { toast('The error text pattern needs at least 10 characters, otherwise it matches almost everything', true); return; }
     var b = this; b.disabled = true;
-    (a.ea_id ? request('PUT', 'api/known-errors/' + a.ea_id, p) : request('POST', 'api/known-errors', p)).then(function () { toast('Saved'); closeDrawer(); refreshAll(); }).catch(function (e) { b.disabled = false; fail(e); });
+    if (!a.ea_id && a.message_guid) p.message_guid = a.message_guid;
+    (a.ea_id ? request('PUT', 'api/known-errors/' + a.ea_id, p) : request('POST', 'api/known-errors', p)).then(function (r) {
+      var k = r && r.kanban;
+      if (k && k.error) toast('Saved, but no Kanban card: ' + k.error, true);
+      else if (k && k.card) toast(k.existed ? 'Saved · Kanban card already exists' : 'Saved · Kanban card created in ' + (k.card.column || 'the board'));
+      else toast('Saved');
+      closeDrawer(); refreshAll();
+    }).catch(function (e) { b.disabled = false; fail(e); });
   };
   var del = $('#a-del');
   if (del) del.onclick = function () {

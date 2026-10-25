@@ -213,9 +213,9 @@ function createKanban(cfg, { pool, env = process.env } = {}) {
   /** enabled = KANBAN_MCP_URL set; connected = a key is set or someone signed in. */
   async function status() {
     if (!enabled) return { enabled: false, connected: false };
-    if (!useOAuth) return { enabled: true, connected: true, auth: 'token' };
+    if (!useOAuth) return { enabled: true, connected: true, auth: 'token', autoCard: cfg.autoCard };
     const s = await store.get();
-    return { enabled: true, connected: Boolean(s.tokens), auth: 'oauth', connectedBy: s.connectedBy || null, connectedAt: s.connectedAt || null };
+    return { enabled: true, connected: Boolean(s.tokens), auth: 'oauth', autoCard: cfg.autoCard, connectedBy: s.connectedBy || null, connectedAt: s.connectedAt || null };
   }
 
   /* ----- board and cards ----- */
@@ -264,7 +264,25 @@ function createKanban(cfg, { pool, env = process.env } = {}) {
     });
   }
 
-  return { enabled, useOAuth, status, connect, finish, disconnect, board, createCard };
+  /**
+   * Card for a new known error (error_analyzed row), unless the board already has one for it. Used when someone
+   * records a root cause, so every known error gets a card without a click. Returns { card, existed }.
+   */
+  async function ensureKnownErrorCard(ea, { detail } = {}) {
+    const card = cardFromKnownError(ea, detail);
+    return session(async (call) => {
+      const id = await boardId(call);
+      const found = await call('find_cards', { boardId: id, search: knownErrorMarker(ea.ea_id), limit: 5 });
+      if (Array.isArray(found) && found.length) return { card: cardSummary(found[0]), existed: true };
+      const args = { boardId: id, column: cfg.column, title: card.title, description: card.description };
+      if (cfg.labels.length) args.labels = cfg.labels;
+      if (cfg.priority && cfg.priority !== 'none') args.priority = cfg.priority;
+      if (cfg.autoAssignees.length) args.assignees = cfg.autoAssignees;
+      return { card: cardSummary(await call('create_card', args)), existed: false };
+    });
+  }
+
+  return { enabled, useOAuth, status, connect, finish, disconnect, board, createCard, ensureKnownErrorCard };
 }
 
 function cardSummary(c) {
@@ -296,4 +314,29 @@ function cardFromError(d) {
   return { title: `Fix error on ${m.flow || m.message_guid}`.slice(0, 200), description: lines.join('\n') };
 }
 
-module.exports = { createKanban, cardFromError, KanbanError, PRIORITIES, CALLBACK_PATH };
+/** Tag in the card notes that ties a card to a known error, so it is found again (find_cards searches notes). */
+function knownErrorMarker(eaId) { return `[CPI-KE-${eaId}]`; }
+
+/** Card for a known error; `detail` (GET /api/errors/:guid shape) adds the message it was recorded from. */
+function cardFromKnownError(ea, detail) {
+  const flow = ea.integration_flow_name || '';
+  const cause = (ea.rootcause || '').replace(/\s+/g, ' ').trim();
+  const head = flow ? `Fix error on ${flow}` : `Known error #${ea.ea_id}`;
+  const title = (cause ? `${head}: ${cause.length > 80 ? cause.slice(0, 80) + '…' : cause}` : head).slice(0, 200);
+  const lines = [
+    `Known error #${ea.ea_id} (${ea.status || 'Open'}) ${knownErrorMarker(ea.ea_id)}`,
+    `iFlow: ${flow || 'any'}`,
+    ea.rootcause ? `Root cause: ${ea.rootcause}` : '',
+    ea.solutions ? `Solution: ${ea.solutions}` : '',
+    '',
+    'Error text pattern:',
+    ea.errormessage || '',
+  ];
+  if (detail && detail.mpl) {
+    const from = cardFromError({ ...detail, analysis: null });
+    lines.push('', 'Recorded from this message:', from.description);
+  }
+  return { title, description: lines.join('\n').replace(/\n{3,}/g, '\n\n').slice(0, 8000) };
+}
+
+module.exports = { createKanban, cardFromError, cardFromKnownError, KanbanError, PRIORITIES, CALLBACK_PATH };

@@ -190,10 +190,19 @@ set `TRUST_PROXY` or `KANBAN_OAUTH_REDIRECT_URL` so the Kanban app sends the bro
 | `KANBAN_COLUMN` | `To do` | Column a new card goes to. |
 | `KANBAN_LABELS` | `Monitoring` | Comma-separated labels for a new card. |
 | `KANBAN_PRIORITY` | `medium` | `none`, `low`, `medium`, `high` or `urgent`. |
+| `KANBAN_AUTO_CARD` | `true` | A new known error creates its card by itself. |
+| `KANBAN_AUTO_ASSIGNEE` | – | Team member(s) for the automatic cards, comma-separated. |
 | `KANBAN_CARD_URL` | (none) | Link to a card in the Kanban app (`{id}` = card id), used in the error details. |
 | `KANBAN_TIMEOUT_MS` | `20000` | Timeout per MCP request. |
 
 Assignees picked in the form are requests: the board owner approves them in the Kanban app.
+
+**Automatic cards for known errors.** When someone records a new known error (root cause & solution), the app
+creates its card by itself: title `Fix error on <iFlow>: <root cause>`, notes with the pattern, root cause,
+solution and, when recorded from an error, that message's details. The notes carry a tag such as `[CPI-KE-12]`, so
+a known error that already has a card is not filed twice; editing a known error never adds a card. The known error
+is saved even if the Kanban server fails; the app then says why no card was created. Turn it off with
+`KANBAN_AUTO_CARD=false`; assign the cards with `KANBAN_AUTO_ASSIGNEE`.
 
 ## Optional: pull errors from CPI directly
 
@@ -252,7 +261,7 @@ All endpoints are under `/api`, require login and return JSON. Errors return `{ 
 | `POST /api/kanban/connect` | Start the Kanban sign-in; returns `{ url }` to open in the browser |
 | `POST /api/kanban/disconnect` | Forget the Kanban tokens |
 | `GET /api/known-errors` | Known errors with hit counts and comments |
-| `POST /api/known-errors` | Create: `{ errormessage, integration_flow_name, rootcause, solutions, status }` |
+| `POST /api/known-errors` | Create: `{ errormessage, integration_flow_name, rootcause, solutions, status, message_guid? }`. With Kanban on, the answer has `kanban: { card, existed }` or `kanban: { error }` |
 | `PUT /api/known-errors/:id` | Update (same body) |
 | `DELETE /api/known-errors/:id` | Delete (comments are deleted too) |
 | `POST /api/known-errors/:id/comments` | Add a comment: `{ comment }` |
