@@ -17,7 +17,7 @@ existing `errorscenario` view, so the app and the view always agree.
 | **Known errors & solutions** | Create / edit / delete entries in `error_analyzed`, set status (Open, In Progress, Monitoring, Resolved), add comments. A status change automatically adds a comment such as "Status changed from Open to Resolved by alice". |
 | **Categories** | Create / edit / delete rules in `error_category`, optionally limited to one iFlow, and see how many errors each rule catches. |
 | **Ticket pulse** | Health of the Freshservice ticket queue (from the table the n8n workflow fills): open backlog, overdue, due soon, unassigned, created vs. resolved per day, backlog by age, group, responder and status, and a filterable list of open tickets with their last comment. The menu shows a red badge with the number of overdue tickets. |
-| **Kanban card** (in the error details) | Turns an error into a card on the TodoList Kanban board (through the board's MCP server). The form is filled with the iFlow, message and correlation IDs, category, known root cause, CPI link and error text; pick the column, priority, labels, assignee and due date, then create. The error details list the cards that already mention the message ID, so the same error is not filed twice. Shown only when `KANBAN_MCP_URL` is set. |
+| **Kanban card** (in the error details) | Turns an error into a card on the TodoList Kanban board (through the board's MCP server). The form is filled with the iFlow, message and correlation IDs, category, known root cause, CPI link and error text; pick the column, priority, labels, assignee and due date, then create. The error details list the cards that already mention the message ID, so the same error is not filed twice. Shown only when `KANBAN_MCP_URL` is set; the first time, someone clicks **Connect Kanban board** and signs in to the Kanban app. |
 | **Certificates** | Certificates and key pairs in the CPI tenant keystore (stored in the database by the n8n workflow) with their expiry date and days left: **Expired**, **Expires soon** (< 30 days), **Expiring** (< 90 days) or **Valid**. Filter by status or type, hide SAP-owned entries, search, open the full details (subject, issuer, serial, fingerprint) and export CSV. The menu shows a red badge with the number of expired and soon-expiring entries. |
 
 Both editors have a **Test against last 30 days** button that shows how many errors a pattern would match before you save it.
@@ -162,14 +162,30 @@ means the workflow has not run or its Freshservice cookie expired.
 
 The app is an MCP client of the TodoList Kanban app (the "WorkStream" MCP server). It uses the server's
 `list_boards`, `get_board`, `find_cards` and `create_card` tools over Streamable HTTP, and opens a short session
-per request. The key acts as its owner on the board, so it needs owner or editor rights (a viewer key is refused).
-The proxy variables (`HTTPS_PROXY`, `NO_PROXY`) apply here too.
+per request. The proxy variables (`HTTPS_PROXY`, `NO_PROXY`) apply here too.
+
+**Login is OAuth** (the standard MCP authorization flow):
+
+1. Set `KANBAN_MCP_URL=https://workstream.teddybiere.info/api/mcp` and restart.
+2. Open any error. The Kanban section shows **Connect Kanban board**. Click it, sign in to the Kanban app and approve.
+3. The browser comes back to `/kanban/oauth/callback` and the app says "Kanban board connected".
+
+The app registers itself with the Kanban server (dynamic client registration), uses PKCE, keeps the client and the
+tokens in the `kanban_oauth` table (created automatically) and refreshes the access token by itself. Cards are
+created as the account that connected, for everyone who uses this app. **Disconnect** (in the Kanban section)
+forgets the tokens. If the tokens are revoked, the section asks to connect again.
+
+The callback address is the address you opened the app with plus `/kanban/oauth/callback`. Behind a reverse proxy,
+set `TRUST_PROXY` or `KANBAN_OAUTH_REDIRECT_URL` so the Kanban app sends the browser back to the public address.
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `KANBAN_MCP_URL` | (off) | MCP endpoint of the Kanban app. Empty hides the Kanban section. |
-| `KANBAN_MCP_TOKEN` | – | API key of the Kanban app. |
-| `KANBAN_MCP_AUTH_HEADER` | `Authorization` | Header for the key. `Authorization` sends `Bearer <key>`; any other header (e.g. `X-API-Key`) sends the key as is. |
+| `KANBAN_OAUTH_REDIRECT_URL` | (from the request) | Callback address registered with the Kanban server. |
+| `KANBAN_OAUTH_CLIENT_ID` / `KANBAN_OAUTH_CLIENT_SECRET` | – | Only when the server does not allow automatic client registration. |
+| `KANBAN_OAUTH_SCOPE` | – | Scope to ask for, if the server needs one. |
+| `KANBAN_MCP_TOKEN` | – | Instead of OAuth: a fixed API key. |
+| `KANBAN_MCP_AUTH_HEADER` | `Authorization` | Header for the fixed key. `Authorization` sends `Bearer <key>`; any other header sends the key as is. |
 | `KANBAN_BOARD` | (first board) | Board id or title, e.g. `TUIP`. |
 | `KANBAN_COLUMN` | `To do` | Column a new card goes to. |
 | `KANBAN_LABELS` | `Monitoring` | Comma-separated labels for a new card. |
@@ -231,7 +247,10 @@ All endpoints are under `/api`, require login and return JSON. Errors return `{ 
 | `GET /api/errors` | Error list. Filters: `flow`, `status` (FAILED/ESCALATED/RETRY), `category` (id or `__none`), `analysis` (`__none`, `__known` or a status), `q`, `limit` (≤ 500), `offset` |
 | `GET /api/errors/:guid` | One message with category, known error, comments, custom attributes, related messages |
 | `GET /api/errors/:guid/card` | Kanban: the suggested card for this error, the board's columns, labels and team, and the cards that already mention the message ID |
-| `POST /api/errors/:guid/card` | Create a Kanban card: `{ title, description, column, labels, priority, assignees, dueDate }` (all optional; missing fields use the suggestion and the `KANBAN_*` defaults). 409 when Kanban is not configured, 502 when the Kanban server fails |
+| `POST /api/errors/:guid/card` | Create a Kanban card: `{ title, description, column, labels, priority, assignees, dueDate }` (all optional; missing fields use the suggestion and the `KANBAN_*` defaults). 409 when Kanban is not set up or not connected (`connect: true`), 502 when the Kanban server fails |
+| `GET /api/kanban/status` | Kanban connection: `enabled`, `connected`, `auth` (oauth/token), who connected and when |
+| `POST /api/kanban/connect` | Start the Kanban sign-in; returns `{ url }` to open in the browser |
+| `POST /api/kanban/disconnect` | Forget the Kanban tokens |
 | `GET /api/known-errors` | Known errors with hit counts and comments |
 | `POST /api/known-errors` | Create: `{ errormessage, integration_flow_name, rootcause, solutions, status }` |
 | `PUT /api/known-errors/:id` | Update (same body) |
@@ -272,7 +291,7 @@ src/
   middleware/        Basic auth, error handling
   cpi/client.js      CPI OData API client (OAuth2 client credentials)
   cpi/certificates.js keystore store/read in the database + expiry classification (Certificates menu)
-  kanban.js          MCP client for the TodoList Kanban board (create a card from an error)
+  kanban.js          MCP client for the TodoList Kanban board (OAuth sign-in, create a card from an error)
   tickets.js         Ticket pulse queries on the Freshservice tickets table (filled by n8n)
   poller/cpi.js      optional CPI MPL poller
   scripts/           db:init / db:seed, one-off poll

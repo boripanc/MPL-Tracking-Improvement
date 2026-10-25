@@ -19,7 +19,7 @@ const PG_CLIENT_ERRORS = {
 };
 
 function errorHandler(err, req, res, next) { // eslint-disable-line no-unused-vars
-  if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
+  if (err instanceof HttpError) return res.status(err.status).json({ error: err.message, ...(err.connect ? { connect: true } : {}) });
   if (err && err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Request body is not valid JSON' });
   if (err && err.type === 'entity.too.large') return res.status(413).json({ error: 'Request body too large' });
   const mapped = err && err.code && PG_CLIENT_ERRORS[err.code];

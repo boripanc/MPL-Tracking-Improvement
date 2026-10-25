@@ -5,7 +5,7 @@ const SQL = require('../sql');
 const { queryResult } = require('../db');
 const { HttpError } = require('../middleware/errors');
 const { checkConnection } = require('../cpi/client');
-const { cardFromError, KanbanError, PRIORITIES } = require('../kanban');
+const { cardFromError, KanbanError, PRIORITIES, CALLBACK_PATH } = require('../kanban');
 
 const STATUSES = ['Open', 'In Progress', 'Monitoring', 'Resolved'];
 const MPL_STATUSES = ['FAILED', 'ESCALATED', 'RETRY'];
@@ -92,7 +92,7 @@ async function kanbanCall(fn) {
   try {
     return await fn();
   } catch (err) {
-    if (err instanceof KanbanError) throw new HttpError(err.status, err.message);
+    if (err instanceof KanbanError) throw Object.assign(new HttpError(err.status, err.message), err.connect ? { connect: true } : {});
     console.error('[kanban] request failed:', err);
     throw new HttpError(502, `Kanban server error: ${err.message}`);
   }
@@ -112,7 +112,11 @@ function apiRouter({ pool, config, certificates, tickets, kanban }) {
 
   router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 
-  router.get('/meta', handle(async () => ({ ...(await run(SQL.meta)), certificatesCanSync: certificates.canSync, kanban: kanban.enabled })));
+  router.get('/meta', handle(async () => ({
+    ...(await run(SQL.meta)),
+    certificatesCanSync: certificates.canSync,
+    kanban: await kanban.status().catch(() => ({ enabled: kanban.enabled, connected: false })),
+  })));
 
   router.get('/dashboard', handle((req) => run(SQL.dashboard, range(req.query, config))));
 
@@ -149,8 +153,24 @@ function apiRouter({ pool, config, certificates, tickets, kanban }) {
     const guid = text(req.params.guid, 'guid', 100, { required: true });
     const data = await run(SQL.errorDetail, { guid });
     if (!data || !data.mpl) throw new HttpError(404, 'Message not found');
-    if (!kanban.enabled) return { enabled: false, suggested: cardFromError(data) };
-    return { ...(await kanbanCall(() => kanban.board({ search: guid }))), suggested: cardFromError(data) };
+    const suggested = cardFromError(data);
+    const st = await kanban.status();
+    if (!st.connected) return { ...st, suggested };
+    return { ...(await kanbanCall(() => kanban.board({ search: guid }))), suggested };
+  }));
+
+  router.get('/kanban/status', handle(() => kanban.status()));
+
+  // Starts the OAuth sign-in; the browser opens the returned URL and comes back to /kanban/oauth/callback.
+  router.post('/kanban/connect', handle((req) => kanbanCall(() => kanban.connect({
+    redirectUri: `${req.protocol}://${req.get('host')}${CALLBACK_PATH}`,
+    user: req.user,
+  }))));
+
+  router.post('/kanban/disconnect', handle(async (req) => {
+    await kanbanCall(() => kanban.disconnect());
+    console.log(`[kanban] ${req.user || 'user'} disconnected the Kanban board`);
+    return kanban.status();
   }));
 
   router.post('/errors/:guid/card', handle(async (req, res) => {
