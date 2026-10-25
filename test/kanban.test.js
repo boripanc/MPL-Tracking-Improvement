@@ -408,7 +408,9 @@ test('OAuth from an app on plain http: the sign-in ends on localhost and the add
     const denied = await app.call('POST', '/api/kanban/finish', { url: 'http://localhost/kanban/oauth/callback?error=access_denied' });
     assert.match(denied.body.error, /not approved: access_denied/);
 
-    const done = await app.call('POST', '/api/kanban/finish', { url: `  ${landed}  ` });
+    // The Kanban site may rewrite the localhost address to its own domain and add iss; only code and state count.
+    const rewritten = landed.replace('http://localhost', 'https://workstream.example') + '&iss=https%3A%2F%2Fworkstream.example';
+    const done = await app.call('POST', '/api/kanban/finish', { url: `  ${rewritten}  ` });
     assert.equal(done.status, 200);
     assert.equal(done.body.connected, true);
     assert.equal((await app.call('POST', '/api/errors/MPL-0002/card', { title: 'via paste' })).status, 201);

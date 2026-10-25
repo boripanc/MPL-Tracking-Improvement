@@ -297,10 +297,10 @@ function connectKanban(btn, guid) {
     openDrawer(drawerHead('Connect Kanban board') +
       '<ol class="small" style="padding-left:18px;line-height:1.6">' +
         '<li><a href="' + esc(r.url) + '" target="_blank" rel="noopener">Open the Kanban sign-in ↗</a>, sign in and approve.</li>' +
-        '<li>The new tab then goes to an address starting with <span class="mono">http://localhost/kanban/oauth/callback</span>. The page itself will not load; that is expected.</li>' +
+        '<li>The new tab then goes to an address ending in <span class="mono">/kanban/oauth/callback?…code=…</span> (on localhost or on the Kanban site). The page may not load or may show an error; that is expected.</li>' +
         '<li>Copy that whole address from the browser bar and paste it below.</li>' +
       '</ol>' +
-      '<input id="k-cb" style="width:100%" placeholder="http://localhost/kanban/oauth/callback?code=…&amp;state=…">' +
+      '<input id="k-cb" style="width:100%" placeholder="…/kanban/oauth/callback?state=…&amp;code=…">' +
       '<div class="row mt"><button class="btn pri" id="k-fin">Finish connecting</button><span class="sp"></span>' + (guid ? '<button class="btn" id="k-back">Back to the error</button>' : '') + '</div>' +
       '<p class="muted small">To skip the copy and paste, serve this app over https and set KANBAN_OAUTH_REDIRECT_URL.</p>');
     var back = $('#k-back'); if (back) back.onclick = function () { openDetail(guid); };
