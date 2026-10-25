@@ -5,7 +5,7 @@ const SQL = require('../sql');
 const { queryResult } = require('../db');
 const { HttpError } = require('../middleware/errors');
 const { checkConnection } = require('../cpi/client');
-const { cardFromError, KanbanError, PRIORITIES, CALLBACK_PATH } = require('../kanban');
+const { cardFromError, parseCallback, KanbanError, PRIORITIES, CALLBACK_PATH } = require('../kanban');
 
 const STATUSES = ['Open', 'In Progress', 'Monitoring', 'Resolved'];
 const MPL_STATUSES = ['FAILED', 'ESCALATED', 'RETRY'];
@@ -159,13 +159,29 @@ function apiRouter({ pool, config, certificates, tickets, kanban }) {
     return { ...(await kanbanCall(() => kanban.board({ search: guid }))), suggested };
   }));
 
+  // Behind a reverse proxy (TRUST_PROXY) the address the browser used is in X-Forwarded-Host.
+  const publicHost = (req) => {
+    const fwd = config.trustProxy && req.get('x-forwarded-host');
+    return fwd ? fwd.split(',')[0].trim() : req.get('host');
+  };
+
   router.get('/kanban/status', handle(() => kanban.status()));
 
   // Starts the OAuth sign-in; the browser opens the returned URL and comes back to /kanban/oauth/callback.
   router.post('/kanban/connect', handle((req) => kanbanCall(() => kanban.connect({
-    redirectUri: `${req.protocol}://${req.get('host')}${CALLBACK_PATH}`,
+    redirectUri: `${req.protocol}://${publicHost(req)}${CALLBACK_PATH}`,
     user: req.user,
   }))));
+
+  // Paste mode: the sign-in ended on http://localhost/...; the user pastes that address here to finish it.
+  router.post('/kanban/finish', handle(async (req) => {
+    const r = parseCallback(text((req.body || {}).url, 'url', 4000, { required: true }));
+    if (r.error) throw new HttpError(400, `The Kanban sign-in was not approved: ${r.error}`);
+    if (!r.code) throw new HttpError(400, 'That address has no code in it. Paste the whole address from the browser bar after you approve.');
+    await kanbanCall(() => kanban.finish(r));
+    console.log(`[kanban] ${req.user || 'user'} connected the Kanban board`);
+    return kanban.status();
+  }));
 
   router.post('/kanban/disconnect', handle(async (req) => {
     await kanbanCall(() => kanban.disconnect());
