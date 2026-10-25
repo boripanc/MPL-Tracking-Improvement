@@ -199,7 +199,7 @@ accepts **https** callbacks (or http on localhost):
 | `KANBAN_LABELS` | `Monitoring` | Comma-separated labels for a new card. |
 | `KANBAN_PRIORITY` | `medium` | `none`, `low`, `medium`, `high` or `urgent`. |
 | `KANBAN_AUTO_CARD` | `true` | A known error saved with status Open creates its card by itself. |
-| `KANBAN_AUTO_ASSIGNEE` | – | Team member(s) for the automatic cards, comma-separated. |
+| `KANBAN_AUTO_ASSIGNEE` | (by capacity) | Empty = member with the most free capacity; names (comma-separated) = always them; `none` = unassigned. |
 | `KANBAN_CARD_URL` | (none) | Link to a card in the Kanban app (`{id}` = card id), used in the error details. |
 | `KANBAN_TIMEOUT_MS` | `20000` | Timeout per MCP request. |
 
@@ -209,9 +209,15 @@ Assignees picked in the form are requests: the board owner approves them in the 
 new or edited back to Open, the app creates its card by itself: title `Fix error on <iFlow>: <root cause>`, notes with the pattern, root cause,
 solution and, when recorded from an error, that message's details. The notes carry a tag such as `[CPI-KE-12]`, so
 a known error that already has a card is not filed twice. Saving with another status (In Progress, Monitoring,
-Resolved) never creates a card. The known error
+Resolved) never creates a card.
+
+**Automatic assignee.** The card goes to the team member with the most free capacity on the board (their capacity
+minus their open cards, from the Kanban app's workload); ties go to fewer overdue cards, then fewer open cards. If
+everyone is at or over capacity, the card stays unassigned. The same person is preselected in the manual card form.
+Set `KANBAN_AUTO_ASSIGNEE` to fixed names to always assign them, or `none` to never assign. The board owner still
+approves assignments in the Kanban app. The known error
 is saved even if the Kanban server fails; the app then says why no card was created. Turn it off with
-`KANBAN_AUTO_CARD=false`; assign the cards with `KANBAN_AUTO_ASSIGNEE`.
+`KANBAN_AUTO_CARD=false`.
 
 ## Optional: pull errors from CPI directly
 

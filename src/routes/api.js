@@ -234,7 +234,10 @@ function apiRouter({ pool, config, certificates, tickets, kanban }) {
       if (!st.connected) return { error: 'The Kanban board is not connected, so no card was created.', connect: true };
       const detail = guid ? await run(SQL.errorDetail, { guid }) : null;
       const r = await kanban.ensureKnownErrorCard(ea, { detail });
-      if (!r.existed) console.log(`[kanban] ${user || 'user'} saved known error ${ea.ea_id} as Open; created card ${r.card.id}`);
+      if (!r.existed) {
+        const to = r.card.assignees && r.card.assignees.length ? `assigned to ${r.card.assignees.join(', ')} (${r.card.assignedBy})` : `unassigned${r.assign && r.assign.reason ? ': ' + r.assign.reason : ''}`;
+        console.log(`[kanban] ${user || 'user'} saved known error ${ea.ea_id} as Open; created card ${r.card.id}, ${to}`);
+      }
       return r;
     } catch (err) {
       console.error(`[kanban] no card for known error ${ea.ea_id}:`, err.message);
