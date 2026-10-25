@@ -28,6 +28,8 @@ function request(method, path, body) {
   if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   return fetch(path, opts).then(function (r) {
     return r.json().catch(function () { return {}; }).then(function (j) {
+      // Session ended (idle, signed out elsewhere, server restarted): back to the login page, then here again.
+      if (r.status === 401 && j.login) { window.location.href = 'login?expired=1&next=' + encodeURIComponent(window.location.pathname + window.location.search); return new Promise(function () {}); }
       if (!r.ok) { var e = new Error(j.error || ('Server returned HTTP ' + r.status)); e.connect = !!j.connect; throw e; }
       return j;
     });
@@ -60,6 +62,8 @@ function load() {
 function loadMeta() {
   return get('api/meta').then(function (m) {
     S.meta = m;
+    var me = $('#me');
+    if (me) { me.hidden = !m.user || m.authDisabled; $('#me-name').textContent = m.user || ''; }
     $('#polled').textContent = m.lastPolled ? 'Data polled ' + dt(m.lastPolled) : '';
     $('#tabs button[data-t="certs"]').hidden = false;
     if (!S.cache.certs) {

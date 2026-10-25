@@ -112,8 +112,10 @@ function apiRouter({ pool, config, certificates, tickets, kanban }) {
 
   router.use((req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 
-  router.get('/meta', handle(async () => ({
+  router.get('/meta', handle(async (req) => ({
     ...(await run(SQL.meta)),
+    user: req.user || null,
+    authDisabled: Boolean(config.auth.disabled),
     certificatesCanSync: certificates.canSync,
     kanban: await kanban.status().catch(() => ({ enabled: kanban.enabled, connected: false })),
   })));
