@@ -76,6 +76,10 @@ function fakeKanbanServer() {
     }
     if (url.pathname === '/register' && req.method === 'POST') {
       const meta = JSON.parse(body);
+      // Same rule as WorkStream: https, or http only on localhost.
+      if (!meta.redirect_uris.every((u) => /^https:/.test(u) || /^http:[/][/](localhost|127[.]0[.]0[.]1)([:/]|$)/.test(u))) {
+        return send(res, 400, { error: 'invalid_redirect_uri', error_description: 'redirect_uris must use https (or http on localhost)' });
+      }
       const client = { ...meta, client_id: `client-${oauth.clients.size + 1}`, client_id_issued_at: Math.floor(Date.now() / 1000) };
       oauth.clients.set(client.client_id, client);
       return send(res, 201, client);
@@ -385,5 +389,46 @@ test('auto cards: assignee setting, switched off, and Kanban failures do not blo
     assert.equal(c.body.kanban.connect, true);
   } finally {
     await Promise.all([assigned.close(), off.close(), broken.close(), oauth.close()]);
+  }
+});
+
+test('OAuth from an app on plain http: the sign-in ends on localhost and the address is pasted back', async () => {
+  const app = await startApp(db.pool, { KANBAN_MCP_URL: mcp.url, TRUST_PROXY: '1' });
+  try {
+    await app.call('POST', '/api/kanban/disconnect');
+    const start = await app.call('POST', '/api/kanban/connect', undefined, { 'X-Forwarded-Host': 'cpi-errors.intranet:3000' });
+    assert.equal(start.status, 200);
+    assert.equal(start.body.paste, true);
+    const signIn = new URL(start.body.url);
+    assert.equal(signIn.searchParams.get('redirect_uri'), 'http://localhost/kanban/oauth/callback');
+    const landed = (await fetch(signIn, { redirect: 'manual' })).headers.get('location');
+    assert.match(landed, /^http:[/][/]localhost[/]kanban[/]oauth[/]callback[?]code=/);
+
+    assert.equal((await app.call('POST', '/api/kanban/finish', { url: 'http://localhost/kanban/oauth/callback' })).status, 400);
+    const denied = await app.call('POST', '/api/kanban/finish', { url: 'http://localhost/kanban/oauth/callback?error=access_denied' });
+    assert.match(denied.body.error, /not approved: access_denied/);
+
+    const done = await app.call('POST', '/api/kanban/finish', { url: `  ${landed}  ` });
+    assert.equal(done.status, 200);
+    assert.equal(done.body.connected, true);
+    assert.equal((await app.call('POST', '/api/errors/MPL-0002/card', { title: 'via paste' })).status, 201);
+  } finally {
+    await app.close();
+  }
+});
+
+test('OAuth behind an https proxy uses the public https address', async () => {
+  const app = await startApp(db.pool, { KANBAN_MCP_URL: mcp.url, TRUST_PROXY: '1' });
+  const fixed = await startApp(db.pool, { KANBAN_MCP_URL: mcp.url, KANBAN_OAUTH_REDIRECT_URL: 'https://cpi.example.com/kanban/oauth/callback' });
+  try {
+    const r = await app.call('POST', '/api/kanban/connect', undefined, { 'X-Forwarded-Host': 'cpi.example.com', 'X-Forwarded-Proto': 'https' });
+    assert.equal(r.body.paste, false);
+    assert.equal(new URL(r.body.url).searchParams.get('redirect_uri'), 'https://cpi.example.com/kanban/oauth/callback');
+    const f = await fixed.call('POST', '/api/kanban/connect', undefined, {});
+    assert.equal(f.body.paste, false);
+    assert.equal(new URL(f.body.url).searchParams.get('redirect_uri'), 'https://cpi.example.com/kanban/oauth/callback');
+  } finally {
+    await app.close();
+    await fixed.close();
   }
 });

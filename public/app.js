@@ -289,21 +289,41 @@ function openDetail(guid) {
 /* ---------- Kanban card from an error (TodoList Kanban over MCP) ---------- */
 function cardLink(k, c) { return k.cardUrl ? '<a href="' + esc(k.cardUrl.split('{id}').join(encodeURIComponent(c.id))) + '" target="_blank" rel="noopener">' + esc(c.title) + ' ↗</a>' : esc(c.title); }
 function kanbanOn() { return !!(S.meta.kanban && S.meta.kanban.enabled); }
-function connectKanban(btn) {
+function connectKanban(btn, guid) {
   if (btn) { btn.disabled = true; btn.textContent = 'Opening sign-in…'; }
-  request('POST', 'api/kanban/connect').then(function (r) { window.location.href = r.url; })
-    .catch(function (e) { if (btn) { btn.disabled = false; btn.textContent = 'Connect Kanban board'; } fail(e); });
+  request('POST', 'api/kanban/connect').then(function (r) {
+    if (!r.paste) { window.location.href = r.url; return; }
+    // This app is not on https, so the sign-in ends on http://localhost and the address is pasted back here.
+    openDrawer(drawerHead('Connect Kanban board') +
+      '<ol class="small" style="padding-left:18px;line-height:1.6">' +
+        '<li><a href="' + esc(r.url) + '" target="_blank" rel="noopener">Open the Kanban sign-in ↗</a>, sign in and approve.</li>' +
+        '<li>The new tab then goes to an address starting with <span class="mono">http://localhost/kanban/oauth/callback</span>. The page itself will not load; that is expected.</li>' +
+        '<li>Copy that whole address from the browser bar and paste it below.</li>' +
+      '</ol>' +
+      '<input id="k-cb" style="width:100%" placeholder="http://localhost/kanban/oauth/callback?code=…&amp;state=…">' +
+      '<div class="row mt"><button class="btn pri" id="k-fin">Finish connecting</button><span class="sp"></span>' + (guid ? '<button class="btn" id="k-back">Back to the error</button>' : '') + '</div>' +
+      '<p class="muted small">To skip the copy and paste, serve this app over https and set KANBAN_OAUTH_REDIRECT_URL.</p>');
+    var back = $('#k-back'); if (back) back.onclick = function () { openDetail(guid); };
+    $('#k-fin').onclick = function () {
+      var v = $('#k-cb').value.trim(); if (!v) { toast('Paste the address first', true); return; }
+      var b = this; b.disabled = true;
+      request('POST', 'api/kanban/finish', { url: v }).then(function (st) {
+        S.meta.kanban = st; toast('Kanban board connected');
+        if (guid) openDetail(guid); else closeDrawer();
+      }).catch(function (e) { b.disabled = false; fail(e); });
+    };
+  }).catch(function (e) { if (btn) { btn.disabled = false; btn.textContent = 'Connect Kanban board'; } fail(e); });
 }
 function kanbanConnectBox(msg) {
   return '<div class="row" id="d-kb"><span class="muted small">' + esc(msg) + '</span><button class="btn sm pri" id="d-kconn">Connect Kanban board</button></div>';
 }
-function bindKanbanConnect() { var b = $('#d-kconn'); if (b) b.onclick = function () { connectKanban(b); }; }
+function bindKanbanConnect(guid) { var b = $('#d-kconn'); if (b) b.onclick = function () { connectKanban(b, guid); }; }
 function loadCardInfo(guid) {
   get('api/errors/' + encodeURIComponent(guid) + '/card').then(function (k) {
     var box = $('#d-kb'); if (!box) return;
     if (!k.connected) {
       box.outerHTML = kanbanConnectBox('Sign in to the Kanban app once to create cards from errors.');
-      bindKanbanConnect();
+      bindKanbanConnect(guid);
       return;
     }
     var ex = k.existing || [];
@@ -320,7 +340,7 @@ function loadCardInfo(guid) {
     };
   }).catch(function (e) {
     var box = $('#d-kb'); if (!box) return;
-    if (e.connect) { box.outerHTML = kanbanConnectBox(e.message); bindKanbanConnect(); return; }
+    if (e.connect) { box.outerHTML = kanbanConnectBox(e.message); bindKanbanConnect(guid); return; }
     box.innerHTML = '<span class="bad small">' + esc(e.message) + '</span>';
   });
 }

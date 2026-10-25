@@ -175,8 +175,14 @@ tokens in the `kanban_oauth` table (created automatically) and refreshes the acc
 created as the account that connected, for everyone who uses this app. **Disconnect** (in the Kanban section)
 forgets the tokens. If the tokens are revoked, the section asks to connect again.
 
-The callback address is the address you opened the app with plus `/kanban/oauth/callback`. Behind a reverse proxy,
-set `TRUST_PROXY` or `KANBAN_OAUTH_REDIRECT_URL` so the Kanban app sends the browser back to the public address.
+The callback address is the address you opened the app with plus `/kanban/oauth/callback`. The Kanban server only
+accepts **https** callbacks (or http on localhost):
+
+- **App on https** (directly or behind an https reverse proxy): set `TRUST_PROXY=1` behind the proxy, or set
+  `KANBAN_OAUTH_REDIRECT_URL=https://<public address>/kanban/oauth/callback`. The browser comes straight back.
+- **App on plain http** (e.g. `http://server:3000`): the sign-in returns to `http://localhost/kanban/oauth/callback`,
+  which does not load. The app shows a box: copy that address from the browser bar, paste it, click
+  **Finish connecting**. This is needed only once, when connecting.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -258,7 +264,8 @@ All endpoints are under `/api`, require login and return JSON. Errors return `{ 
 | `GET /api/errors/:guid/card` | Kanban: the suggested card for this error, the board's columns, labels and team, and the cards that already mention the message ID |
 | `POST /api/errors/:guid/card` | Create a Kanban card: `{ title, description, column, labels, priority, assignees, dueDate }` (all optional; missing fields use the suggestion and the `KANBAN_*` defaults). 409 when Kanban is not set up or not connected (`connect: true`), 502 when the Kanban server fails |
 | `GET /api/kanban/status` | Kanban connection: `enabled`, `connected`, `auth` (oauth/token), who connected and when |
-| `POST /api/kanban/connect` | Start the Kanban sign-in; returns `{ url }` to open in the browser |
+| `POST /api/kanban/connect` | Start the Kanban sign-in; returns `{ url, paste }` (`paste: true` = the app is on plain http, see above) |
+| `POST /api/kanban/finish` | Finish the sign-in with the pasted callback address: `{ url }` (app on plain http) |
 | `POST /api/kanban/disconnect` | Forget the Kanban tokens |
 | `GET /api/known-errors` | Known errors with hit counts and comments |
 | `POST /api/known-errors` | Create: `{ errormessage, integration_flow_name, rootcause, solutions, status, message_guid? }`. With Kanban on, the answer has `kanban: { card, existed }` or `kanban: { error }` |

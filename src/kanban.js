@@ -164,7 +164,12 @@ function createKanban(cfg, { pool, env = process.env } = {}) {
   /** Starts the sign-in. `redirectUri` is where the Kanban app sends the browser back. Returns the URL to open. */
   async function connect({ redirectUri, user }) {
     if (!useOAuth) throw new KanbanError('This server uses a fixed Kanban API key (KANBAN_MCP_TOKEN), so there is nothing to connect.', 409);
-    const uri = cfg.redirectUrl || redirectUri;
+    // The Kanban server only takes an https callback (or http on localhost). When this app is opened over plain
+    // http on another host and no KANBAN_OAUTH_REDIRECT_URL is set, the sign-in returns to http://localhost and
+    // the user pastes that address back into the app ("paste" mode).
+    let uri = cfg.redirectUrl || redirectUri;
+    const paste = !cfg.redirectUrl && !callbackAllowed(uri);
+    if (paste) uri = `http://localhost${CALLBACK_PATH}`;
     const saved = await store.get();
     // A client registered for another callback address (the app moved) has to register again.
     const stale = saved.client && Array.isArray(saved.client.redirect_uris) && !saved.client.redirect_uris.includes(uri);
@@ -179,7 +184,7 @@ function createKanban(cfg, { pool, env = process.env } = {}) {
       throw new KanbanError(`Cannot start the Kanban sign-in: ${err.message}`);
     }
     if (result !== 'REDIRECT' || !url) throw new KanbanError('The Kanban server did not ask for a sign-in.');
-    return { url: url.toString() };
+    return { url: url.toString(), paste };
   }
 
   /** Finishes the sign-in with the code and state the Kanban app sent back. */
@@ -314,6 +319,23 @@ function cardFromError(d) {
   return { title: `Fix error on ${m.flow || m.message_guid}`.slice(0, 200), description: lines.join('\n') };
 }
 
+/** OAuth servers accept https callbacks, and plain http only on this computer (localhost). */
+function callbackAllowed(uri) {
+  return /^https:[/][/]/i.test(uri) || /^http:[/][/](localhost|127[.]0[.]0[.]1|\[::1\])([:/]|$)/i.test(uri);
+}
+
+/** Reads code / state / error from the address the browser landed on after the sign-in (paste mode). */
+function parseCallback(text) {
+  const raw = String(text || '').trim();
+  let q;
+  try {
+    q = new URL(raw).searchParams;
+  } catch {
+    q = new URLSearchParams(raw.replace(/^[^?]*[?]/, ''));
+  }
+  return { code: q.get('code') || '', state: q.get('state') || '', error: q.get('error_description') || q.get('error') || '' };
+}
+
 /** Tag in the card notes that ties a card to a known error, so it is found again (find_cards searches notes). */
 function knownErrorMarker(eaId) { return `[CPI-KE-${eaId}]`; }
 
@@ -339,4 +361,4 @@ function cardFromKnownError(ea, detail) {
   return { title, description: lines.join('\n').replace(/\n{3,}/g, '\n\n').slice(0, 8000) };
 }
 
-module.exports = { createKanban, cardFromError, cardFromKnownError, KanbanError, PRIORITIES, CALLBACK_PATH };
+module.exports = { createKanban, cardFromError, cardFromKnownError, parseCallback, callbackAllowed, KanbanError, PRIORITIES, CALLBACK_PATH };
