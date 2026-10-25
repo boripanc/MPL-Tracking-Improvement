@@ -142,7 +142,7 @@ test.after(async () => {
 });
 
 test('meta says whether the Kanban board is connected', async () => {
-  assert.deepEqual((await api.call('GET', '/api/meta')).body.kanban, { enabled: true, connected: true, auth: 'token' });
+  assert.deepEqual((await api.call('GET', '/api/meta')).body.kanban, { enabled: true, connected: true, auth: 'token', autoCard: true });
   const off = await startApp(db.pool);
   try {
     assert.deepEqual((await off.call('GET', '/api/meta')).body.kanban, { enabled: false, connected: false });
@@ -241,7 +241,7 @@ test('OAuth: connect once, create cards, refresh the token, disconnect', async (
   const app = await startApp(db.pool, { KANBAN_MCP_URL: mcp.url, KANBAN_BOARD: 'TUIP' });
   const authz = 'Basic ' + Buffer.from('alice:wonderland').toString('base64');
   try {
-    assert.deepEqual((await app.call('GET', '/api/meta')).body.kanban, { enabled: true, connected: false, auth: 'oauth', connectedBy: null, connectedAt: null });
+    assert.deepEqual((await app.call('GET', '/api/meta')).body.kanban, { enabled: true, connected: false, auth: 'oauth', autoCard: true, connectedBy: null, connectedAt: null });
     const before = await app.call('GET', '/api/errors/MPL-0002/card');
     assert.equal(before.body.connected, false);
     assert.match(before.body.suggested.title, /INT401/);
@@ -322,5 +322,68 @@ test('OAuth: the sign-in page reporting an error comes back as a message', async
     assert.match(r.headers.get('location'), /kanban=error&msg=User\+said\+no/);
   } finally {
     await app.close();
+  }
+});
+
+const KNOWN = { integration_flow_name: 'INT406_TUE_IOT_COMB', errormessage: 'HTTP operation failed invoking', rootcause: 'MWW API down', solutions: 'Restart', status: 'Open' };
+
+test('a new known error creates its Kanban card by itself', async () => {
+  const r = await api.call('POST', '/api/known-errors', { ...KNOWN, message_guid: 'MPL-0001' });
+  assert.equal(r.status, 201);
+  const id = r.body.ea_id;
+  assert.equal(r.body.kanban.existed, false);
+  assert.equal(r.body.kanban.card.column, 'To do');
+  assert.equal(lastArgs.title, 'Fix error on INT406_TUE_IOT_COMB: MWW API down');
+  assert.match(lastArgs.description, new RegExp(`\\[CPI-KE-${id}\\]`));
+  assert.match(lastArgs.description, /Root cause: MWW API down/);
+  assert.match(lastArgs.description, /Recorded from this message:[\s\S]*Message ID: MPL-0001/);
+  assert.deepEqual(lastArgs.labels, ['Monitoring']);
+  assert.equal(lastArgs.assignees, undefined);
+
+  // Editing the known error does not create another card.
+  const n = cards.length;
+  const u = await api.call('PUT', `/api/known-errors/${id}`, { ...KNOWN, status: 'In Progress' });
+  assert.equal(u.status, 200);
+  assert.equal(cards.length, n);
+});
+
+test('a known error that already has a card is not filed twice', async () => {
+  const next = (await db.pool.query("SELECT nextval(pg_get_serial_sequence('error_analyzed', 'ea_id')) AS n")).rows[0].n;
+  const id = Number(next) + 1;
+  cards.push({ id: 'pre', column: 'Backlog', title: 'made by hand', description: `notes [CPI-KE-${id}]`, createdAt: new Date().toISOString() });
+  const n = cards.length;
+  const r = await api.call('POST', '/api/known-errors', KNOWN);
+  assert.equal(r.body.ea_id, id);
+  assert.equal(r.body.kanban.existed, true);
+  assert.equal(r.body.kanban.card.id, 'pre');
+  assert.equal(cards.length, n);
+});
+
+test('auto cards: assignee setting, switched off, and Kanban failures do not block the save', async () => {
+  const assigned = await startApp(db.pool, { KANBAN_MCP_URL: mcp.url, KANBAN_MCP_TOKEN: TOKEN, KANBAN_AUTO_ASSIGNEE: 'Boripan.C' });
+  const off = await startApp(db.pool, { KANBAN_MCP_URL: mcp.url, KANBAN_MCP_TOKEN: TOKEN, KANBAN_AUTO_CARD: 'false' });
+  const broken = await startApp(db.pool, { KANBAN_MCP_URL: mcp.url, KANBAN_MCP_TOKEN: TOKEN, KANBAN_COLUMN: 'Nowhere' });
+  const oauth = await startApp(db.pool, { KANBAN_MCP_URL: mcp.url });
+  try {
+    const a = await assigned.call('POST', '/api/known-errors', KNOWN);
+    assert.equal(a.status, 201);
+    assert.deepEqual(lastArgs.assignees, ['Boripan.C']);
+
+    const n = cards.length;
+    const o = await off.call('POST', '/api/known-errors', KNOWN);
+    assert.equal(o.status, 201);
+    assert.equal(o.body.kanban, undefined);
+    assert.equal(cards.length, n);
+
+    const b = await broken.call('POST', '/api/known-errors', KNOWN);
+    assert.equal(b.status, 201);
+    assert.ok(b.body.ea_id);
+    assert.match(b.body.kanban.error, /Column "Nowhere" not found/);
+
+    const c = await oauth.call('POST', '/api/known-errors', KNOWN);
+    assert.equal(c.status, 201);
+    assert.equal(c.body.kanban.connect, true);
+  } finally {
+    await Promise.all([assigned.close(), off.close(), broken.close(), oauth.close()]);
   }
 });
