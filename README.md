@@ -198,17 +198,18 @@ accepts **https** callbacks (or http on localhost):
 | `KANBAN_COLUMN` | `To do` | Column a new card goes to. |
 | `KANBAN_LABELS` | `Monitoring` | Comma-separated labels for a new card. |
 | `KANBAN_PRIORITY` | `medium` | `none`, `low`, `medium`, `high` or `urgent`. |
-| `KANBAN_AUTO_CARD` | `true` | A new known error creates its card by itself. |
+| `KANBAN_AUTO_CARD` | `true` | A known error saved with status Open creates its card by itself. |
 | `KANBAN_AUTO_ASSIGNEE` | – | Team member(s) for the automatic cards, comma-separated. |
 | `KANBAN_CARD_URL` | (none) | Link to a card in the Kanban app (`{id}` = card id), used in the error details. |
 | `KANBAN_TIMEOUT_MS` | `20000` | Timeout per MCP request. |
 
 Assignees picked in the form are requests: the board owner approves them in the Kanban app.
 
-**Automatic cards for known errors.** When someone records a new known error (root cause & solution), the app
-creates its card by itself: title `Fix error on <iFlow>: <root cause>`, notes with the pattern, root cause,
+**Automatic cards for known errors.** When a known error (root cause & solution) is saved with status **Open**,
+new or edited back to Open, the app creates its card by itself: title `Fix error on <iFlow>: <root cause>`, notes with the pattern, root cause,
 solution and, when recorded from an error, that message's details. The notes carry a tag such as `[CPI-KE-12]`, so
-a known error that already has a card is not filed twice; editing a known error never adds a card. The known error
+a known error that already has a card is not filed twice. Saving with another status (In Progress, Monitoring,
+Resolved) never creates a card. The known error
 is saved even if the Kanban server fails; the app then says why no card was created. Turn it off with
 `KANBAN_AUTO_CARD=false`; assign the cards with `KANBAN_AUTO_ASSIGNEE`.
 

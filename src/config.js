@@ -138,7 +138,7 @@ function loadConfig(env = process.env) {
       column: (env.KANBAN_COLUMN || 'To do').trim(),
       labels: String(env.KANBAN_LABELS === undefined ? 'Monitoring' : env.KANBAN_LABELS).split(',').map((s) => s.trim()).filter(Boolean),
       priority: (env.KANBAN_PRIORITY || 'medium').trim().toLowerCase(),
-      // A new known error (root cause recorded) gets a card by itself, assigned to these team members.
+      // A known error saved with status Open gets a card by itself (once), assigned to these team members.
       autoCard: bool(env.KANBAN_AUTO_CARD, true),
       autoAssignees: String(env.KANBAN_AUTO_ASSIGNEE || '').split(',').map((s) => s.trim()).filter(Boolean),
       // Optional link to a card in the Kanban app; {id} = card id.

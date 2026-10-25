@@ -224,16 +224,17 @@ function apiRouter({ pool, config, certificates, tickets, kanban }) {
     return { ...saved, kanban: await autoCard(saved, guid, req.user) };
   }));
 
-  // A new known error gets a Kanban card by itself (KANBAN_AUTO_CARD). The known error is saved either way;
-  // a Kanban problem only comes back as kanban.error.
+  // A known error saved with status Open (new, or edited back to Open) gets a Kanban card by itself
+  // (KANBAN_AUTO_CARD), once: a card that already carries its tag is reused. The known error is saved either
+  // way; a Kanban problem only comes back as kanban.error.
   async function autoCard(ea, guid, user) {
-    if (!kanban.enabled || !config.kanban.autoCard || !ea) return undefined;
+    if (!kanban.enabled || !config.kanban.autoCard || !ea || ea.status !== 'Open') return undefined;
     try {
       const st = await kanban.status();
       if (!st.connected) return { error: 'The Kanban board is not connected, so no card was created.', connect: true };
       const detail = guid ? await run(SQL.errorDetail, { guid }) : null;
       const r = await kanban.ensureKnownErrorCard(ea, { detail });
-      if (!r.existed) console.log(`[kanban] ${user || 'user'} recorded known error ${ea.ea_id}; created card ${r.card.id}`);
+      if (!r.existed) console.log(`[kanban] ${user || 'user'} saved known error ${ea.ea_id} as Open; created card ${r.card.id}`);
       return r;
     } catch (err) {
       console.error(`[kanban] no card for known error ${ea.ea_id}:`, err.message);
@@ -244,7 +245,8 @@ function apiRouter({ pool, config, certificates, tickets, kanban }) {
   router.put('/known-errors/:id', handle(async (req) => {
     const saved = await run(SQL.saveKnownError, { ...knownErrorBody(req.body || {}), ea_id: id(req.params.id), user: req.user });
     if (!saved) throw new HttpError(404, 'Known error not found');
-    return saved;
+    const card = await autoCard(saved, '', req.user);
+    return card ? { ...saved, kanban: card } : saved;
   }));
 
   router.delete('/known-errors/:id', handle(async (req) => {

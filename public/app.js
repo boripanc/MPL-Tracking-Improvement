@@ -434,7 +434,7 @@ function openAnalysis(a) {
     '<label class="f" for="a-rc">Root cause</label><textarea id="a-rc" rows="3" class="txt">' + esc(a.rootcause || '') + '</textarea>' +
     '<label class="f" for="a-sol">Solution</label><textarea id="a-sol" rows="4" class="txt">' + esc(a.solutions || '') + '</textarea>' +
     '<label class="f" for="a-st">Status</label><select id="a-st">' + opts(STATUSES.map(function (s) { return [s, s]; }), a.status || 'Open') + '</select>' +
-    (isNew && S.meta.kanban && S.meta.kanban.enabled && S.meta.kanban.autoCard ? '<p class="muted small">Saving also creates a card on the Kanban board.</p>' : '') +
+    (S.meta.kanban && S.meta.kanban.enabled && S.meta.kanban.autoCard ? '<p class="muted small">Saving with status Open also creates a card on the Kanban board (once per known error).</p>' : '') +
     '<div class="row mt"><button class="btn pri" id="a-save">Save</button>' + (isNew ? '' : '<button class="btn danger" id="a-del">Delete</button>') + '<span class="sp"></span><button class="btn" data-close>Cancel</button></div>' +
     (isNew ? '' : '<h3>Comments</h3><div id="a-cm">' + commentsHtml(a.comments || []) + '</div><textarea id="a-nc" rows="2" class="txt" placeholder="Add a comment (investigation notes, who is working on it)"></textarea><div class="row" style="margin-top:6px"><button class="btn sm" id="a-addc">Add comment</button></div>'));
   $('#a-test').onclick = function () { testMatch('like', $('#a-pat').value, $('#a-flow').value, '#a-res'); };
@@ -446,7 +446,7 @@ function openAnalysis(a) {
     (a.ea_id ? request('PUT', 'api/known-errors/' + a.ea_id, p) : request('POST', 'api/known-errors', p)).then(function (r) {
       var k = r && r.kanban;
       if (k && k.error) toast('Saved, but no Kanban card: ' + k.error, true);
-      else if (k && k.card) toast(k.existed ? 'Saved · Kanban card already exists' : 'Saved · Kanban card created in ' + (k.card.column || 'the board'));
+      else if (k && k.card) toast(k.existed ? 'Saved' : 'Saved · Kanban card created in ' + (k.card.column || 'the board'));
       else toast('Saved');
       closeDrawer(); refreshAll();
     }).catch(function (e) { b.disabled = false; fail(e); });
