@@ -107,11 +107,15 @@ function createTicketStore({ pool, config }) {
                     WHERE btrim(tg) IN (${EXCLUDED_TAGS.map((t) => `'${t}'`).join(', ')}))`);
     }
     if (have.has('change_process_type')) {
-      where.push(`COALESCE(btrim(${quoteIdent('change_process_type')}::text), '') NOT IN (${EXCLUDED_CHANGE_TYPES.map((t) => `'${t}'`).join(', ')})`);
+      where.push(`lower(COALESCE(btrim(${quoteIdent('change_process_type')}::text), '')) NOT IN (${EXCLUDED_CHANGE_TYPES.map((t) => `'${t.toLowerCase()}'`).join(', ')})`);
     }
     const closureStored = CLOSURE_FIELDS.every((f) => have.has(f.key));
     return { ok: true, closureStored, select, where: where.length ? 'WHERE ' + where.join('\n    AND ') : '' };
   }
+
+  // Closure fields that are empty on a row (HTML tags, &nbsp; and spaces do not count as content).
+  const missing = (r) => `array_remove(ARRAY[${CLOSURE_FIELDS.map((f) =>
+    `CASE WHEN COALESCE(regexp_replace(${r}.${f.key}, '<[^>]*>|&nbsp;|\\s', '', 'g'), '') = '' THEN '${f.key}' END`).join(', ')}], NULL)`;
 
   const tk = (src) => `tk AS (
   SELECT ${src.select},
@@ -142,12 +146,12 @@ ${tk(src)},
 o AS (SELECT tk.*, now() - created_at AS age FROM tk WHERE NOT closed),
 created AS (SELECT tk.* FROM tk, rng WHERE created_at >= rng.f AND created_at < rng.t),
 resolved AS (SELECT tk.* FROM tk, rng WHERE closed AND updated_at >= rng.f AND updated_at < rng.t),
-incomplete AS (
-  SELECT r.*, array_remove(ARRAY[
-      CASE WHEN COALESCE(btrim(regexp_replace(r.issue_summary, '<[^>]*>|&nbsp;|\\s', '', 'g')), '') = '' THEN 'issue_summary' END,
-      CASE WHEN COALESCE(btrim(regexp_replace(r.correction_solution, '<[^>]*>|&nbsp;|\\s', '', 'g')), '') = '' THEN 'correction_solution' END,
-      CASE WHEN COALESCE(btrim(regexp_replace(r.root_cause, '<[^>]*>|&nbsp;|\\s', '', 'g')), '') = '' THEN 'root_cause' END], NULL) AS missing
-  FROM resolved r),
+incomplete AS (SELECT r.*, ${missing('r')} AS missing FROM resolved r),
+-- Every ticket created this calendar month (in the viewer's time zone), whatever the view.
+mon AS (
+  SELECT m.*, CASE WHEN m.closed THEN ${missing('m')} END AS missing
+  FROM tk m, rng
+  WHERE m.created_at >= date_trunc('month', now() AT TIME ZONE rng.tz) AT TIME ZONE rng.tz),
 b AS (SELECT COALESCE(view, CASE WHEN t - f <= interval '3 days' THEN 'hour' ELSE 'day' END) AS unit FROM rng),
 buckets AS (
   SELECT generate_series(date_trunc(b.unit, rng.f AT TIME ZONE rng.tz), date_trunc(b.unit, rng.t AT TIME ZONE rng.tz),
@@ -196,6 +200,16 @@ SELECT json_build_object(
     'rows', (SELECT COALESCE(json_agg(x), '[]') FROM (
         SELECT id, subject, status, grp, responder, updated_at AS closed_at, missing FROM incomplete
         WHERE cardinality(missing) > 0 ORDER BY updated_at DESC LIMIT 500) x)),
+  'month', json_build_object(
+    'start', (SELECT date_trunc('month', now() AT TIME ZONE tz) AT TIME ZONE tz FROM rng),
+    'created', (SELECT count(*) FROM mon),
+    'open', (SELECT count(*) FROM mon WHERE NOT closed),
+    'closed', (SELECT count(*) FROM mon WHERE closed),
+    'incomplete', (SELECT count(*) FROM mon WHERE closed AND cardinality(missing) > 0),
+    'rows', (SELECT COALESCE(json_agg(x), '[]') FROM (
+        SELECT id, subject, type, status, closed, pending_reason, grp, responder, requester, entity, category, sub_category, item,
+               created_at, updated_at, due_by, missing
+        FROM mon ORDER BY created_at DESC LIMIT 1000) x)),
   'open', (SELECT COALESCE(json_agg(x), '[]') FROM (
       SELECT id, subject, type, status, pending_reason, grp, responder, requester, entity, category, sub_category, item,
              created_at, updated_at, due_by, last_comment_at, last_comment_by, last_comment_type
@@ -208,7 +222,7 @@ SELECT json_build_object(
     data.open.forEach((t) => { t.link = ticketLink(config.tickets.linkTemplate, t.id); });
     data.closure.stored = src.closureStored;
     data.closure.fields = CLOSURE_FIELDS;
-    data.closure.rows.forEach((t) => { t.link = ticketLink(config.tickets.linkTemplate, t.id); });
+    [...data.closure.rows, ...data.month.rows].forEach((t) => { t.link = ticketLink(config.tickets.linkTemplate, t.id); });
     const last = data.lastChange ? Date.parse(data.lastChange) : null;
     return {
       enabled: true,

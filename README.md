@@ -158,8 +158,11 @@ causes on company servers:
 
 The **Ticket pulse** menu shows how the Freshservice ticket queue is doing: open backlog, overdue, due soon and
 unassigned tickets, created vs. resolved per day in the selected period, the backlog by age, group, responder,
-status and pending reason, and a filterable list of all open tickets (click one for its description and last
-comment). The menu shows a red badge with the number of overdue tickets.
+status and pending reason (folded under **Breakdowns**), and a filterable list of all open tickets (click one for
+its description and last comment). The menu shows a red badge with the number of overdue tickets.
+Above the open tickets, **This month** lists every ticket created in the current calendar month, whatever its
+status, with buttons to show only the ones still open, resolved / closed, or missing closure notes. Long lists show
+the first rows with a **Show all** button.
 The **View** switch at the top picks **Daily** (the period picker), **Weekly** (last 12 weeks), **Monthly**
 (last 12 months) or **Yearly** (last 5 years) for the created vs. resolved chart, the created / resolved KPI
 (this week, month or year next to the previous one), first response time and top sub-categories.
@@ -167,8 +170,8 @@ The **View** switch at the top picks **Daily** (the period picker), **Weekly** (
 It reads the `tickets` table that the **n8n workflow "FreshServices Tickets"** fills (one row per ticket, keyed by
 `human_display_id`). The app only reads it and does not create it. Open = any status except Resolved and Closed.
 Tickets tagged `noncharge` / `noncharged` and tickets whose Change Process Type (`change_process_type`) is
-Standard, Normal or Emergency are left out of every number, chart and list.
-**Closed tickets missing closure notes** lists tickets resolved or closed in the selected period whose
+Standard, Normal or Emergency (any letter case) are left out of every number, chart and list.
+**Closure notes** lists tickets resolved or closed in the selected period whose
 Issue/Investigation Summary, Correction Solution or Root Cause is empty (columns `issue_summary`,
 `correction_solution`, `root_cause`, from the Freshservice custom fields of the same names; HTML-only blanks
 such as `<p>&nbsp;</p>` count as empty). Until the n8n workflow stores those columns, the card says so.

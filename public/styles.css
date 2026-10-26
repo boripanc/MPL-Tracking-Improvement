@@ -104,3 +104,16 @@ label.check{display:inline-flex;gap:6px;align-items:center;font-size:13px;color:
 .rich td,.rich th{border:1px solid var(--line);padding:4px 6px}
 .rich h1,.rich h2,.rich h3,.rich h4{font-size:14px;margin:10px 0 6px;color:var(--text);text-transform:none;letter-spacing:0}
 .rich pre{white-space:pre-wrap}
+/* Ticket pulse */
+h2.sec{font-size:15px;margin:28px 0 10px;display:flex;align-items:baseline;gap:8px}
+h3 small{text-transform:none;letter-spacing:0;font-weight:400}
+.ch.sm{height:220px}
+.more{display:flex;gap:10px;align-items:center;justify-content:center;padding-top:10px}
+.pill.tko{background:var(--accent-weak);color:var(--accent)}
+.pill.tkp{background:rgba(217,119,6,.15);color:var(--warn)}
+.pill.tkw{background:rgba(79,70,229,.14);color:#4f46e5}
+.pill.tkd{background:rgba(22,163,74,.14);color:var(--ok)}
+details.card>summary{cursor:pointer;list-style-position:inside}
+#v-tickets td{vertical-align:top}
+.ok{color:var(--ok)}
+#tk-month .seg{flex-wrap:wrap}

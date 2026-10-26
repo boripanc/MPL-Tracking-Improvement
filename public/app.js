@@ -774,6 +774,37 @@ function countTable(rows, key, empty, cols) {
         (cols[1] ? '<td class="num">' + (r.overdue ? '<b class="bad">' + fmt(r.overdue) + '</b>' : '0') + '</td>' : '') + '</tr>';
     }).join('') + '</tbody></table>';
 }
+// Rows shown before "Show all" in each Ticket pulse list.
+var TK_PAGE = { month: 15, open: 25, closure: 10 };
+S.tkMore = {};
+S.tm = 'all';
+var TM_VIEWS = { all: 'All', open: 'Still open', closed: 'Resolved / closed', missing: 'Missing closure notes' };
+function tkStatus(s) {
+  var cls = { Open: 'tko', Pending: 'tkp', 'In Progress': 'tkw', Resolved: 'tkd', Closed: 'tkd' }[s] || 'tk';
+  return '<span class="pill ' + cls + '">' + esc(s || 'None') + '</span>';
+}
+function tkId(t) {
+  return '<b>' + (t.link ? '<a href="' + esc(t.link) + '" target="_blank" rel="noopener" title="Open in Freshservice" data-ext>' + esc(t.id) + ' ↗</a>' : esc(t.id)) + '</b>';
+}
+function tkCat(t) {
+  var parts = [t.category, t.sub_category, t.item].filter(Boolean);
+  return parts.length ? '<span class="small">' + parts.map(esc).join(' <span class="muted">›</span> ') + '</span>' : '<span class="muted">–</span>';
+}
+function tkOwner(t) {
+  return (t.responder ? esc(t.responder) : '<span class="bad">Unassigned</span>') + (t.grp ? '<div class="muted small">' + esc(t.grp) + '</div>' : '');
+}
+function tkMore(key, shown, total) {
+  if (total <= TK_PAGE[key]) return '';
+  return '<div class="more"><button class="btn sm" data-more="' + key + '">' + (S.tkMore[key] ? 'Show fewer' : 'Show all ' + fmt(total)) + '</button>' +
+    (S.tkMore[key] ? '' : '<span class="muted small">showing ' + fmt(shown) + ' of ' + fmt(total) + '</span>') + '</div>';
+}
+function tkPage(key, rows) { return S.tkMore[key] ? rows : rows.slice(0, TK_PAGE[key]); }
+function bindMore(root, rerender) {
+  $$(root + ' [data-more]').forEach(function (b) { b.onclick = function () { S.tkMore[b.dataset.more] = !S.tkMore[b.dataset.more]; rerender(); }; });
+}
+function bindRows(root, rows) {
+  $$(root + ' tr[data-i]').forEach(function (t) { t.onclick = function (e) { if (e.target.closest('[data-ext]')) return; openTicket(rows[+t.dataset.i].id); }; });
+}
 function loadTickets() {
   var v = $('#v-tickets');
   if (!v.innerHTML) v.innerHTML = '<div class="empty">Loading…</div>';
@@ -784,35 +815,38 @@ function loadTickets() {
       return;
     }
     S.cache.tickets = d;
-    var span = TP[S.tp].span;
+    var span = TP[S.tp].span, open = false;
+    try { open = localStorage.getItem('cpiec-tkbreak') === '1'; } catch (e) {}
     v.innerHTML =
       '<div class="filters"><span class="muted small">View</span><div class="seg" role="group" aria-label="View">' +
         Object.keys(TP).map(function (x) { return '<button class="btn' + (x === S.tp ? ' on' : '') + '" data-tp="' + x + '" aria-pressed="' + (x === S.tp) + '">' + TP[x].label + '</button>'; }).join('') +
-      '</div><span class="muted small">' + esc(S.tp === 'day' ? 'Uses the period picker at the top.' : 'Created, resolved and first response ' + span + '.') + '</span></div>' +
+      '</div><span class="muted small">' + esc(S.tp === 'day' ? 'Uses the period picker at the top.' : 'Charts and figures cover ' + span + '.') + '</span>' +
+      '<span class="sp"></span><span class="muted small">Newest ticket change ' + esc(dt(d.lastChange)) + '</span></div>' +
       (d.stale ? '<div class="card" style="margin-bottom:16px"><b class="bad">The ticket data may be out of date:</b> <span class="muted">the newest ticket change is from ' + esc(d.lastChange ? dt(d.lastChange) : 'never') + ', more than ' + d.staleHours + ' hours ago. Run the n8n workflow "FreshServices Tickets" (and check its Freshservice cookie) to refresh it.</span></div>' : '') +
       '<div class="grid kpis" id="tk-kpis"></div>' +
       '<div class="grid two mt">' +
-        '<div class="card"><h2>Created vs. resolved <small>' + esc(span) + '</small></h2><div class="ch"><canvas id="c-tk-flow"></canvas></div></div>' +
-        '<div class="card"><h2>Open backlog by age <small>since the ticket was created</small></h2><div class="ch"><canvas id="c-tk-age"></canvas></div></div>' +
+        '<div class="card"><h2>Created vs. resolved <small>' + esc(span) + '</small></h2><div class="ch sm"><canvas id="c-tk-flow"></canvas></div></div>' +
+        '<div class="card"><h2>Open tickets by age <small>since the ticket was created</small></h2><div class="ch sm"><canvas id="c-tk-age"></canvas></div></div>' +
       '</div>' +
-      '<div class="grid half mt">' +
-        '<div class="card"><h2>Open by group <small>click to filter the list</small></h2><div class="scroll">' + countTable(d.byGroup, 'tg', 'No open tickets.', ['Group', 'Overdue']) + '</div></div>' +
-        '<div class="card"><h2>Open by responder <small>click to filter the list</small></h2><div class="scroll">' + countTable(d.byResponder, 'tr', 'No open tickets.', ['Responder', 'Overdue']) + '</div></div>' +
-      '</div>' +
-      '<div class="grid half mt">' +
-        '<div class="card"><h2>Open by status</h2><div class="scroll">' + countTable(d.byStatus, 'ts', 'No open tickets.', ['Status']) +
-          (d.byPending.length ? '<h3>Pending reasons</h3>' + countTable(d.byPending, 'tp', '', ['Reason']) : '') + '</div></div>' +
-        '<div class="card"><h2>Top sub-categories <small>tickets created ' + esc(span) + '</small></h2><div class="scroll">' + countTable(d.bySubCategory, 'tc', 'No tickets created in this period.', ['Sub-category']).replace('<th class="num">Open</th>', '<th class="num">Created</th>') + '</div></div>' +
-      '</div>' +
-      closureCard(d) +
-      '<div class="filters mt"><select id="tf-view" aria-label="Show"></select><select id="tf-grp" aria-label="Group"></select><select id="tf-resp" aria-label="Responder"></select>' +
-        '<input id="tf-q" type="search" placeholder="Search ticket, subject, category, requester or entity" style="min-width:240px;flex:1">' +
-        '<button class="btn" id="tf-clear">Clear filters</button><button class="btn" id="tf-csv">Export CSV</button></div>' +
-      '<div class="card"><div class="row" style="margin-bottom:8px"><b id="tk-count"></b><span class="sp"></span><span class="muted small">Newest ticket change ' + esc(dt(d.lastChange)) + '</span></div><div class="scroll" id="tk-tab"></div></div>' +
-      '<p class="muted small">Freshservice tickets from the database table the n8n workflow "FreshServices Tickets" fills. Open = any status except Resolved and Closed. Tickets tagged noncharge and changes (Standard, Normal, Emergency) are left out. Due soon = due within ' + d.dueSoonHours + ' hours (TICKETS_DUE_SOON_HOURS).</p>';
+      '<h2 class="sec">This month</h2><div class="card" id="tk-month"></div>' +
+      '<h2 class="sec">Open tickets</h2>' +
+      '<div class="card"><div class="filters"><select id="tf-view" aria-label="Show"></select><select id="tf-grp" aria-label="Group"></select><select id="tf-resp" aria-label="Responder"></select>' +
+        '<input id="tf-q" type="search" placeholder="Search ticket, subject, category, requester or entity" style="min-width:220px;flex:1">' +
+        '<button class="btn" id="tf-clear">Clear</button><button class="btn" id="tf-csv">Export CSV</button></div>' +
+        '<div class="row" style="margin-bottom:8px"><b id="tk-count"></b></div><div class="scroll" id="tk-tab"></div></div>' +
+      '<h2 class="sec">Closure notes</h2><div class="card" id="tk-closure"></div>' +
+      '<details class="card mt" id="tk-break"' + (open ? ' open' : '') + '><summary><b>Breakdowns</b> <span class="muted small">open tickets by group, responder and status; top sub-categories</span></summary>' +
+        '<div class="grid half mt">' +
+          '<div><h3>By group <small>click to filter the list</small></h3><div class="scroll">' + countTable(d.byGroup, 'tg', 'No open tickets.', ['Group', 'Overdue']) + '</div></div>' +
+          '<div><h3>By responder <small>click to filter the list</small></h3><div class="scroll">' + countTable(d.byResponder, 'tr', 'No open tickets.', ['Responder', 'Overdue']) + '</div></div>' +
+          '<div><h3>By status</h3><div class="scroll">' + countTable(d.byStatus, 'ts', 'No open tickets.', ['Status']) +
+            (d.byPending.length ? '<h3>Pending reasons</h3>' + countTable(d.byPending, 'tp', '', ['Reason']) : '') + '</div></div>' +
+          '<div><h3>Top sub-categories <small>tickets created ' + esc(span) + '</small></h3><div class="scroll">' + countTable(d.bySubCategory, 'tc', 'No tickets created in this period.', ['Sub-category']).replace('<th class="num">Open</th>', '<th class="num">Created</th>') + '</div></div>' +
+        '</div></details>' +
+      '<p class="muted small">Freshservice tickets from the database table the n8n workflow "FreshServices Tickets" fills. Open = any status except Resolved and Closed. Tickets tagged noncharge and changes (Change Process Type Standard, Normal or Emergency) are left out everywhere on this page. Due soon = due within ' + d.dueSoonHours + ' hours (TICKETS_DUE_SOON_HOURS).</p>';
     $('#tf-q').value = S.tf.q;
-    $$('#v-tickets tr[data-cl]').forEach(function (t) { t.onclick = function (e) { if (e.target.closest('[data-ext]')) return; openTicket(t.dataset.cl); }; });
-    $$('#v-tickets [data-tp]').forEach(function (b) { b.onclick = function () { if (b.dataset.tp !== S.tp) setTicketView(b.dataset.tp); }; });
+    $('#tk-break').ontoggle = function () { try { localStorage.setItem('cpiec-tkbreak', this.open ? '1' : '0'); } catch (e) {} };
+    $$('#v-tickets [data-tp]').forEach(function (b) { if (b.tagName === 'BUTTON') b.onclick = function () { if (b.dataset.tp !== S.tp) setTicketView(b.dataset.tp); }; });
     $('#tf-view').onchange = function () { S.tf.view = this.value; renderTickets(); };
     $('#tf-grp').onchange = function () { S.tf.grp = this.value; renderTickets(); };
     $('#tf-resp').onchange = function () { S.tf.responder = this.value; renderTickets(); };
@@ -825,20 +859,57 @@ function loadTickets() {
     $$('#v-tickets tr[data-ts], #v-tickets tr[data-tp]').forEach(function (t) { t.onclick = pick(function (el) { return { q: (el.dataset.ts || el.dataset.tp).toLowerCase() }; }); });
     $$('#v-tickets tr[data-tc]').forEach(function (t) { t.classList.remove('click'); });
     drawTickets(d);
+    renderMonth();
     renderTickets();
+    renderClosure();
   });
 }
+function renderMonth() {
+  var d = S.cache.tickets, m = d.month, labels = closureLabels(d);
+  var name = new Date(m.start).toLocaleString(undefined, { month: 'long', year: 'numeric' });
+  var match = function (t) {
+    if (S.tm === 'open') return !t.closed;
+    if (S.tm === 'closed') return t.closed;
+    if (S.tm === 'missing') return t.closed && t.missing && t.missing.length;
+    return true;
+  };
+  var all = m.rows.filter(match), rows = tkPage('month', all);
+  var counts = { all: m.created, open: m.open, closed: m.closed, missing: m.incomplete };
+  var html = '<h2>Tickets created in ' + esc(name) + ' <small>every status, newest first</small></h2>' +
+    '<div class="filters"><div class="seg" role="group" aria-label="Show">' + Object.keys(TM_VIEWS).map(function (x) {
+      return '<button class="btn sm' + (x === S.tm ? ' on' : '') + '" data-tm="' + x + '" aria-pressed="' + (x === S.tm) + '">' + esc(TM_VIEWS[x]) + ' <b' + (x === 'missing' && counts[x] ? ' class="bad"' : '') + '>' + fmt(counts[x]) + '</b></button>';
+    }).join('') + '</div></div>';
+  if (!all.length) {
+    html += '<div class="empty">' + (m.created ? 'No tickets this month match this filter.' : 'No tickets were created this month yet.') + '</div>';
+  } else {
+    html += '<div class="scroll"><table><thead><tr><th>Ticket</th><th>Subject</th><th>Category</th><th>Status</th><th>Responder</th><th>Created</th><th>Closure notes</th></tr></thead><tbody>' +
+      rows.map(function (t, i) {
+        var notes = !t.closed ? '<span class="muted">–</span>'
+          : !d.closure.stored ? '<span class="muted">not stored yet</span>'
+          : t.missing && t.missing.length ? t.missing.map(function (k) { return '<span class="pill Open">' + esc(labels[k] || k) + '</span>'; }).join(' ')
+          : '<span class="ok">✓ Complete</span>';
+        return '<tr class="click" data-i="' + i + '"><td class="nowrap">' + tkId(t) + (t.type ? '<div class="muted small">' + esc(t.type) + '</div>' : '') + '</td>' +
+          '<td>' + esc(short(t.subject, 90)) + '</td><td>' + tkCat(t) + '</td>' +
+          '<td>' + tkStatus(t.status) + '</td><td class="small">' + tkOwner(t) + '</td>' +
+          '<td class="nowrap small">' + esc(dt(t.created_at)) + '</td><td>' + notes + '</td></tr>';
+      }).join('') + '</tbody></table></div>' + tkMore('month', rows.length, all.length);
+  }
+  $('#tk-month').innerHTML = html;
+  $$('#tk-month [data-tm]').forEach(function (b) { b.onclick = function () { S.tm = b.dataset.tm; renderMonth(); }; });
+  bindMore('#tk-month', renderMonth);
+  bindRows('#tk-month', rows);
+}
 function renderTickets() {
-  var d = S.cache.tickets, f = S.tf, k = d.kpi, net = k.created - k.resolved;
+  var d = S.cache.tickets, f = S.tf, k = d.kpi;
   $('#tk-kpis').innerHTML =
-    tkKpi('all', 'Open backlog', fmt(k.open), 'all open tickets', '') +
+    tkKpi('all', 'Open tickets', fmt(k.open), 'all open tickets', '') +
     tkKpi('overdue', 'Overdue', fmt(k.overdue), 'past the due date', k.overdue ? 'alert' : 'good') +
     tkKpi('soon', 'Due soon', fmt(k.dueSoon), 'due within ' + d.dueSoonHours + ' hours', k.dueSoon ? 'warn' : '') +
     tkKpi('unassigned', 'Unassigned', fmt(k.unassigned), 'open, no responder', k.unassigned ? 'warn' : '') +
     createdKpi(d) +
     tkKpi('', 'First response', k.frtMedianH == null ? '–' : k.frtMedianH + ' h', 'median, tickets created ' + TP[S.tp].span, '');
   $$('#tk-kpis [data-tv]').forEach(function (el) {
-    var go = function () { S.tf.view = el.dataset.tv; renderTickets(); };
+    var go = function () { S.tf.view = el.dataset.tv; renderTickets(); $('#tk-tab').scrollIntoView({ behavior: 'smooth', block: 'start' }); };
     el.onclick = go;
     el.onkeydown = function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } };
   });
@@ -846,41 +917,50 @@ function renderTickets() {
   $('#tf-grp').innerHTML = opts([['', 'All groups']].concat(d.byGroup.map(function (g) { return [g.name, g.name]; })), f.grp);
   $('#tf-resp').innerHTML = opts([['', 'All responders']].concat(d.byResponder.map(function (r) { return [r.name, r.name]; })), f.responder);
   if (document.activeElement !== $('#tf-q')) $('#tf-q').value = f.q;
-  var rows = d.open.filter(function (t) { return tkMatches(t, f, d.dueSoonHours); });
-  S.cache.ticketRows = rows;
-  $('#tk-count').textContent = fmt(rows.length) + ' of ' + fmt(k.open) + ' open tickets' + (d.open.length < k.open ? ' (list shows the first ' + fmt(d.open.length) + ')' : '');
-  if (!rows.length) { $('#tk-tab').innerHTML = '<div class="empty">No open tickets match these filters.</div>'; return; }
-  $('#tk-tab').innerHTML = '<table><thead><tr><th>Ticket</th><th>Subject</th><th>Category</th><th>Sub-category</th><th>Item</th><th>Status</th><th>Group</th><th>Responder</th><th class="num">Age</th><th>Due</th><th>Last comment</th></tr></thead><tbody>' +
+  var all = d.open.filter(function (t) { return tkMatches(t, f, d.dueSoonHours); });
+  S.cache.ticketRows = all;
+  $('#tk-count').textContent = fmt(all.length) + ' of ' + fmt(k.open) + ' open tickets' + (d.open.length < k.open ? ' (the list holds the first ' + fmt(d.open.length) + ')' : '') + ', overdue first';
+  if (!all.length) { $('#tk-tab').innerHTML = '<div class="empty">No open tickets match these filters.</div>'; return; }
+  var rows = tkPage('open', all);
+  $('#tk-tab').innerHTML = '<table><thead><tr><th>Ticket</th><th>Subject</th><th>Category</th><th>Status</th><th>Responder</th><th class="num">Age</th><th>Due</th><th>Last comment</th></tr></thead><tbody>' +
     rows.map(function (t, i) {
-      return '<tr class="click" data-i="' + i + '"><td class="nowrap"><b>' + (t.link ? '<a href="' + esc(t.link) + '" target="_blank" rel="noopener" title="Open in Freshservice" data-ext>' + esc(t.id) + ' ↗</a>' : esc(t.id)) + '</b>' + (t.type ? '<div class="muted small">' + esc(t.type) + '</div>' : '') + '</td>' +
-        '<td>' + esc(short(t.subject, 120)) + (t.requester || t.entity ? '<div class="muted small">' + esc([t.requester, t.entity].filter(Boolean).join(' · ')) + '</div>' : '') + '</td>' +
-        '<td class="small">' + esc(t.category || '') + '</td><td class="small">' + esc(t.sub_category || '') + '</td><td class="small">' + esc(t.item || '') + '</td>' +
-        '<td>' + pill(t.status, 'tk') + (t.pending_reason ? '<div class="muted small">' + esc(t.pending_reason) + '</div>' : '') + '</td>' +
-        '<td class="small">' + esc(t.grp || '') + '</td><td class="small">' + (t.responder ? esc(t.responder) : '<span class="bad">Unassigned</span>') + '</td>' +
+      return '<tr class="click" data-i="' + i + '"><td class="nowrap">' + tkId(t) + (t.type ? '<div class="muted small">' + esc(t.type) + '</div>' : '') + '</td>' +
+        '<td>' + esc(short(t.subject, 90)) + (t.requester || t.entity ? '<div class="muted small">' + esc([t.requester, t.entity].filter(Boolean).join(' · ')) + '</div>' : '') + '</td>' +
+        '<td>' + tkCat(t) + '</td>' +
+        '<td>' + tkStatus(t.status) + (t.pending_reason ? '<div class="muted small">' + esc(t.pending_reason) + '</div>' : '') + '</td>' +
+        '<td class="small">' + tkOwner(t) + '</td>' +
         '<td class="num nowrap">' + ageText(t.created_at) + '</td><td class="nowrap">' + dueText(t.due_by) + '</td>' +
         '<td class="small nowrap">' + (t.last_comment_at ? esc(dt(t.last_comment_at)) + '<div class="muted">' + esc([t.last_comment_by, t.last_comment_type].filter(Boolean).join(' · ')) + '</div>' : '<span class="muted">–</span>') + '</td></tr>';
-    }).join('') + '</tbody></table>';
-  $$('#tk-tab tr[data-i]').forEach(function (t) { t.onclick = function (e) { if (e.target.closest('[data-ext]')) return; openTicket(rows[+t.dataset.i].id); }; });
+    }).join('') + '</tbody></table>' + tkMore('open', rows.length, all.length);
+  bindMore('#tk-tab', renderTickets);
+  bindRows('#tk-tab', rows);
 }
-function closureCard(d) {
-  var c = d.closure, span = TP[S.tp].span;
+function closureLabels(d) {
   var labels = {};
-  c.fields.forEach(function (f) { labels[f.key] = f.label; });
-  var head = '<h2>Closed tickets missing closure notes <small>resolved or closed ' + esc(span) + '; each needs ' + esc(c.fields.map(function (f) { return f.label; }).join(', ')) + '</small></h2>';
+  d.closure.fields.forEach(function (f) { labels[f.key] = f.label; });
+  return labels;
+}
+function renderClosure() {
+  var d = S.cache.tickets, c = d.closure, span = TP[S.tp].span, labels = closureLabels(d);
+  var head = '<h2>Resolved / closed tickets missing closure notes <small>' + esc(span) + '; each needs ' + esc(c.fields.map(function (f) { return f.label; }).join(', ')) + '</small></h2>';
   if (!c.stored) {
-    return '<div class="card mt">' + head + '<p class="muted" style="margin:0">These fields are not in the tickets table yet. The n8n workflow "FreshServices Tickets" has to store <span class="mono">issue_summary</span>, <span class="mono">correction_solution</span> and <span class="mono">root_cause</span> first.</p></div>';
+    $('#tk-closure').innerHTML = head + '<p class="muted" style="margin:0">These fields are not in the tickets table yet. The n8n workflow "FreshServices Tickets" has to store <span class="mono">issue_summary</span>, <span class="mono">correction_solution</span> and <span class="mono">root_cause</span> first.</p>';
+    return;
   }
+  var rows = tkPage('closure', c.rows);
   var body = !c.closed ? '<div class="empty">No tickets were resolved or closed ' + esc(span) + '.</div>'
     : !c.rows.length ? '<div class="empty">All ' + fmt(c.closed) + ' resolved or closed tickets have every closure note.</div>'
-    : '<div class="scroll"><table><thead><tr><th>Ticket</th><th>Subject</th><th>Status</th><th>Group</th><th>Responder</th><th>Closed</th><th>Missing</th></tr></thead><tbody>' +
-      c.rows.map(function (t) {
-        return '<tr class="click" data-cl="' + esc(t.id) + '"><td class="nowrap"><b>' + (t.link ? '<a href="' + esc(t.link) + '" target="_blank" rel="noopener" title="Open in Freshservice" data-ext>' + esc(t.id) + ' ↗</a>' : esc(t.id)) + '</b></td>' +
-          '<td>' + esc(short(t.subject, 120)) + '</td><td>' + pill(t.status, 'tk') + '</td><td class="small">' + esc(t.grp || '') + '</td>' +
-          '<td class="small">' + esc(t.responder || '') + '</td><td class="nowrap">' + esc(dt(t.closed_at)) + '</td>' +
+    : '<div class="scroll"><table><thead><tr><th>Ticket</th><th>Subject</th><th>Status</th><th>Responder</th><th>Closed</th><th>Missing</th></tr></thead><tbody>' +
+      rows.map(function (t, i) {
+        return '<tr class="click" data-i="' + i + '"><td class="nowrap">' + tkId(t) + '</td>' +
+          '<td>' + esc(short(t.subject, 90)) + '</td><td>' + tkStatus(t.status) + '</td><td class="small">' + tkOwner(t) + '</td>' +
+          '<td class="nowrap small">' + esc(dt(t.closed_at)) + '</td>' +
           '<td>' + t.missing.map(function (m) { return '<span class="pill Open">' + esc(labels[m] || m) + '</span>'; }).join(' ') + '</td></tr>';
-      }).join('') + '</tbody></table></div>';
+      }).join('') + '</tbody></table></div>' + tkMore('closure', rows.length, c.rows.length);
   var count = c.closed ? ' <span class="' + (c.rows.length ? 'bad' : 'muted') + '" style="font-weight:600">' + fmt(c.incomplete) + ' of ' + fmt(c.closed) + ' (' + pct(c.incomplete, c.closed) + ')</span>' : '';
-  return '<div class="card mt">' + head.replace('</h2>', count + '</h2>') + body + '</div>';
+  $('#tk-closure').innerHTML = head.replace('</h2>', count + '</h2>') + body;
+  bindMore('#tk-closure', renderClosure);
+  bindRows('#tk-closure', rows);
 }
 function createdKpi(d) {
   var k = d.kpi, net = k.created - k.resolved, tp = TP[S.tp];

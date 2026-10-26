@@ -171,3 +171,27 @@ test('closed tickets missing Issue Summary, Correction Solution or Root Cause ar
   const detail = (await api.call('GET', '/api/tickets/INC-105')).body;
   assert.equal(detail.correction_solution, 'Fixed mapping');
 });
+
+test('this month lists every ticket created this calendar month, without excluded tickets', async () => {
+  const d = (await api.call('GET', '/api/tickets/pulse?tz=Asia/Bangkok')).body;
+  const start = Date.parse(d.month.start);
+  const ids = d.month.rows.map((r) => r.id);
+  assert.equal(d.month.created, ids.length);
+  assert.ok(d.month.rows.every((r) => Date.parse(r.created_at) >= start));
+  assert.ok(!ids.some((id) => /^INC-20/.test(id)));
+  assert.equal(d.month.open + d.month.closed, d.month.created);
+  if (ids.includes('INC-105')) {
+    const r = d.month.rows.find((x) => x.id === 'INC-105');
+    assert.deepEqual(r.missing, ['root_cause']);
+    assert.equal(r.link, 'https://itservice.example.com/a/tickets/105');
+  }
+  const open = d.month.rows.find((r) => !r.closed);
+  if (open) assert.equal(open.missing, null);
+});
+
+test('change process type is matched without regard to case', async () => {
+  await db.pool.query(`INSERT INTO tickets (human_display_id, status_name, created_at, change_process_type) VALUES ('INC-207', 'Open', now(), 'standard ')`);
+  assert.equal((await api.call('GET', '/api/tickets/INC-207')).status, 404);
+  const d = (await api.call('GET', '/api/tickets/pulse')).body;
+  assert.ok(!d.month.rows.some((r) => r.id === 'INC-207'));
+});
