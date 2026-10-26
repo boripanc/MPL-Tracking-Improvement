@@ -804,12 +804,14 @@ function loadTickets() {
           (d.byPending.length ? '<h3>Pending reasons</h3>' + countTable(d.byPending, 'tp', '', ['Reason']) : '') + '</div></div>' +
         '<div class="card"><h2>Top sub-categories <small>tickets created ' + esc(span) + '</small></h2><div class="scroll">' + countTable(d.bySubCategory, 'tc', 'No tickets created in this period.', ['Sub-category']).replace('<th class="num">Open</th>', '<th class="num">Created</th>') + '</div></div>' +
       '</div>' +
+      closureCard(d) +
       '<div class="filters mt"><select id="tf-view" aria-label="Show"></select><select id="tf-grp" aria-label="Group"></select><select id="tf-resp" aria-label="Responder"></select>' +
         '<input id="tf-q" type="search" placeholder="Search ticket, subject, category, requester or entity" style="min-width:240px;flex:1">' +
         '<button class="btn" id="tf-clear">Clear filters</button><button class="btn" id="tf-csv">Export CSV</button></div>' +
       '<div class="card"><div class="row" style="margin-bottom:8px"><b id="tk-count"></b><span class="sp"></span><span class="muted small">Newest ticket change ' + esc(dt(d.lastChange)) + '</span></div><div class="scroll" id="tk-tab"></div></div>' +
       '<p class="muted small">Freshservice tickets from the database table the n8n workflow "FreshServices Tickets" fills. Open = any status except Resolved and Closed. Tickets tagged noncharge and changes (Standard, Normal, Emergency) are left out. Due soon = due within ' + d.dueSoonHours + ' hours (TICKETS_DUE_SOON_HOURS).</p>';
     $('#tf-q').value = S.tf.q;
+    $$('#v-tickets tr[data-cl]').forEach(function (t) { t.onclick = function (e) { if (e.target.closest('[data-ext]')) return; openTicket(t.dataset.cl); }; });
     $$('#v-tickets [data-tp]').forEach(function (b) { b.onclick = function () { if (b.dataset.tp !== S.tp) setTicketView(b.dataset.tp); }; });
     $('#tf-view').onchange = function () { S.tf.view = this.value; renderTickets(); };
     $('#tf-grp').onchange = function () { S.tf.grp = this.value; renderTickets(); };
@@ -860,6 +862,26 @@ function renderTickets() {
     }).join('') + '</tbody></table>';
   $$('#tk-tab tr[data-i]').forEach(function (t) { t.onclick = function (e) { if (e.target.closest('[data-ext]')) return; openTicket(rows[+t.dataset.i].id); }; });
 }
+function closureCard(d) {
+  var c = d.closure, span = TP[S.tp].span;
+  var labels = {};
+  c.fields.forEach(function (f) { labels[f.key] = f.label; });
+  var head = '<h2>Closed tickets missing closure notes <small>resolved or closed ' + esc(span) + '; each needs ' + esc(c.fields.map(function (f) { return f.label; }).join(', ')) + '</small></h2>';
+  if (!c.stored) {
+    return '<div class="card mt">' + head + '<p class="muted" style="margin:0">These fields are not in the tickets table yet. The n8n workflow "FreshServices Tickets" has to store <span class="mono">issue_summary</span>, <span class="mono">correction_solution</span> and <span class="mono">root_cause</span> first.</p></div>';
+  }
+  var body = !c.closed ? '<div class="empty">No tickets were resolved or closed ' + esc(span) + '.</div>'
+    : !c.rows.length ? '<div class="empty">All ' + fmt(c.closed) + ' resolved or closed tickets have every closure note.</div>'
+    : '<div class="scroll"><table><thead><tr><th>Ticket</th><th>Subject</th><th>Status</th><th>Group</th><th>Responder</th><th>Closed</th><th>Missing</th></tr></thead><tbody>' +
+      c.rows.map(function (t) {
+        return '<tr class="click" data-cl="' + esc(t.id) + '"><td class="nowrap"><b>' + (t.link ? '<a href="' + esc(t.link) + '" target="_blank" rel="noopener" title="Open in Freshservice" data-ext>' + esc(t.id) + ' ↗</a>' : esc(t.id)) + '</b></td>' +
+          '<td>' + esc(short(t.subject, 120)) + '</td><td>' + pill(t.status, 'tk') + '</td><td class="small">' + esc(t.grp || '') + '</td>' +
+          '<td class="small">' + esc(t.responder || '') + '</td><td class="nowrap">' + esc(dt(t.closed_at)) + '</td>' +
+          '<td>' + t.missing.map(function (m) { return '<span class="pill Open">' + esc(labels[m] || m) + '</span>'; }).join(' ') + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+  var count = c.closed ? ' <span class="' + (c.rows.length ? 'bad' : 'muted') + '" style="font-weight:600">' + fmt(c.incomplete) + ' of ' + fmt(c.closed) + ' (' + pct(c.incomplete, c.closed) + ')</span>' : '';
+  return '<div class="card mt">' + head.replace('</h2>', count + '</h2>') + body + '</div>';
+}
 function createdKpi(d) {
   var k = d.kpi, net = k.created - k.resolved, tp = TP[S.tp];
   if (S.tp === 'day' || !d.series.length) {
@@ -906,6 +928,10 @@ function openTicket(id) {
         kv('First response', t.frt_secs ? Math.round(t.frt_secs / 360) / 10 + ' h' : '') +
         kv('Tags', esc(t.tags)) +
       '</div>' +
+      (t.closed || t.issue_summary || t.correction_solution || t.root_cause ? '<h3>Closure notes</h3><div class="box">' +
+        [['Issue/Investigation Summary', t.issue_summary], ['Correction Solution', t.correction_solution], ['Root Cause', t.root_cause]].map(function (f) {
+          return '<div class="lbl">' + esc(f[0]) + '</div><div class="txt">' + (f[1] && String(f[1]).trim() ? esc(f[1]) : '<span class="bad">Missing</span>') + '</div>';
+        }).join('') + '</div>' : '') +
       (t.last_comment_at ? '<h3>Last comment</h3><div class="box"><div class="muted small">' + esc(dtFull(t.last_comment_at)) + ' · ' + esc([t.last_comment_by, t.last_comment_type].filter(Boolean).join(' · ')) + '</div><div class="txt" style="margin-top:6px">' + esc(t.last_comment_text || '') + '</div></div>' : '') +
       (t.details ? '<h3>Description</h3><div class="box rich" id="tk-desc"></div>' : ''));
     if (t.details) $('#tk-desc').appendChild(safeHtml(t.details));
