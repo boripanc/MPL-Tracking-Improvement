@@ -51,7 +51,7 @@ test.before(async () => {
   }
   await db.pool.query(`INSERT INTO tickets (human_display_id, status_name, "group", created_at, updated_at, tags, change_process_type)
     VALUES ('INC-206', 'Resolved', 'EDI Support', $1, $1, 'EDI,charge', 'Not a change')`, [ago(24 * 200)]);
-  api = await startApp(db.pool, { TICKET_URL: 'https://itservice.example.com/a/tickets/{number}' });
+  api = await startApp(db.pool, { TICKET_URL: 'https://itservice.example.com/a/tickets/{number}', TICKETS_CLOSURE_GROUPS: 'all' });
 });
 test.after(async () => {
   await api.close();
@@ -194,4 +194,21 @@ test('change process type is matched without regard to case', async () => {
   assert.equal((await api.call('GET', '/api/tickets/INC-207')).status, 404);
   const d = (await api.call('GET', '/api/tickets/pulse')).body;
   assert.ok(!d.month.rows.some((r) => r.id === 'INC-207'));
+});
+
+test('closure notes are checked only for the configured groups (default L2 DDAI TUIP)', async () => {
+  const { loadConfig } = require('../src/config');
+  assert.deepEqual(loadConfig({}).tickets.closureGroups, ['L2 DDAI TUIP']);
+  assert.deepEqual(loadConfig({ TICKETS_CLOSURE_GROUPS: 'all' }).tickets.closureGroups, []);
+  const edi = await startApp(db.pool, { TICKETS_CLOSURE_GROUPS: ' edi support ' });
+  try {
+    const d = (await edi.call('GET', '/api/tickets/pulse?view=year')).body;
+    assert.deepEqual(d.closure.groups, ['edi support']);
+    assert.equal(d.closure.closed, 2); // INC-105 and INC-206; INC-106 (CPI Support) is not checked
+    assert.deepEqual(d.closure.rows.map((r) => r.id), ['INC-105']);
+    const cpi = d.month.rows.find((r) => r.grp === 'CPI Support' && r.closed);
+    if (cpi) assert.equal(cpi.missing, null);
+  } finally {
+    await edi.close();
+  }
 });

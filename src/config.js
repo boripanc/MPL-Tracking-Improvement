@@ -124,6 +124,9 @@ function loadConfig(env = process.env) {
       linkTemplate: /^(off|none|false)$/i.test(env.TICKET_URL || '') ? '' : (env.TICKET_URL || 'https://itservice.thaiunion.com/a/tickets/{number}'),
       dueSoonHours: Math.max(1, int(env.TICKETS_DUE_SOON_HOURS, 72)),
       staleHours: Math.max(1, int(env.TICKETS_STALE_HOURS, 24)),
+      // Groups whose resolved / closed tickets must have closure notes (comma-separated; "all" = every group).
+      closureGroups: /^\s*(all|\*)\s*$/i.test(env.TICKETS_CLOSURE_GROUPS || '') ? []
+        : (env.TICKETS_CLOSURE_GROUPS || 'L2 DDAI TUIP').split(',').map((g) => g.trim()).filter(Boolean),
     },
     kanban: {
       // MCP server of the TodoList Kanban app (Streamable HTTP), used to create a card from an error.

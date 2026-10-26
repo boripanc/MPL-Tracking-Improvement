@@ -171,7 +171,7 @@ It reads the `tickets` table that the **n8n workflow "FreshServices Tickets"** f
 `human_display_id`). The app only reads it and does not create it. Open = any status except Resolved and Closed.
 Tickets tagged `noncharge` / `noncharged` and tickets whose Change Process Type (`change_process_type`) is
 Standard, Normal or Emergency (any letter case) are left out of every number, chart and list.
-**Closure notes** lists tickets resolved or closed in the selected period whose
+**Closure notes** lists tickets of the `TICKETS_CLOSURE_GROUPS` groups resolved or closed in the selected period whose
 Issue/Investigation Summary, Correction Solution or Root Cause is empty (columns `issue_summary`,
 `correction_solution`, `root_cause`, from the Freshservice custom fields of the same names; HTML-only blanks
 such as `<p>&nbsp;</p>` count as empty). Until the n8n workflow stores those columns, the card says so.
@@ -185,6 +185,7 @@ means the workflow has not run or its Freshservice cookie expired.
 | `TICKET_URL` | `https://itservice.thaiunion.com/a/tickets/{number}` | Link to a ticket (`{number}` = digits of `INC-123`, `{id}` = the whole id). The ticket number in the list and the ticket panel link there. `off` hides the links. |
 | `TICKETS_DUE_SOON_HOURS` | `72` | Open tickets due within this many hours count as **Due soon**. |
 | `TICKETS_STALE_HOURS` | `24` | Warn when the newest ticket change is older than this. |
+| `TICKETS_CLOSURE_GROUPS` | `L2 DDAI TUIP` | Groups whose resolved / closed tickets are checked for closure notes (comma-separated, any letter case; `all` = every group). |
 
 ## Kanban cards from errors
 

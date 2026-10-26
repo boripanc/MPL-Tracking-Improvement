@@ -886,6 +886,7 @@ function renderMonth() {
       rows.map(function (t, i) {
         var notes = !t.closed ? '<span class="muted">–</span>'
           : !d.closure.stored ? '<span class="muted">not stored yet</span>'
+          : !t.missing ? '<span class="muted" title="Closure notes are checked only for ' + esc(d.closure.groups.join(', ')) + '">not checked</span>'
           : t.missing && t.missing.length ? t.missing.map(function (k) { return '<span class="pill Open">' + esc(labels[k] || k) + '</span>'; }).join(' ')
           : '<span class="ok">✓ Complete</span>';
         return '<tr class="click" data-i="' + i + '"><td class="nowrap">' + tkId(t) + (t.type ? '<div class="muted small">' + esc(t.type) + '</div>' : '') + '</td>' +
@@ -942,7 +943,8 @@ function closureLabels(d) {
 }
 function renderClosure() {
   var d = S.cache.tickets, c = d.closure, span = TP[S.tp].span, labels = closureLabels(d);
-  var head = '<h2>Resolved / closed tickets missing closure notes <small>' + esc(span) + '; each needs ' + esc(c.fields.map(function (f) { return f.label; }).join(', ')) + '</small></h2>';
+  var scope = c.groups && c.groups.length ? ' in ' + c.groups.join(', ') : '';
+  var head = '<h2>Resolved / closed tickets' + esc(scope) + ' missing closure notes <small>' + esc(span) + '; each needs ' + esc(c.fields.map(function (f) { return f.label; }).join(', ')) + '</small></h2>';
   if (!c.stored) {
     $('#tk-closure').innerHTML = head + '<p class="muted" style="margin:0">These fields are not in the tickets table yet. The n8n workflow "FreshServices Tickets" has to store <span class="mono">issue_summary</span>, <span class="mono">correction_solution</span> and <span class="mono">root_cause</span> first.</p>';
     return;
