@@ -158,8 +158,9 @@ causes on company servers:
 
 The **Ticket pulse** menu shows how the Freshservice ticket queue is doing: open backlog, overdue, due soon and
 unassigned tickets, created vs. resolved per day in the selected period, the backlog by age, group, responder,
-status and pending reason (folded under **Breakdowns**), and a filterable list of all open tickets (click one for
-its description and last comment). The menu shows a red badge with the number of overdue tickets.
+status and pending reason (folded under **Breakdowns**), and a filterable list of all open tickets with the days
+since their last comment (orange from 3 days, red from 7; the **No comment for 3+ days** filter lists the quiet ones;
+click a ticket for its description and last comment). The menu shows a red badge with the number of overdue tickets.
 Above the open tickets, **This month** lists every ticket created in the current calendar month, whatever its
 status, with buttons to show only the ones still open, resolved / closed, or missing closure notes. Long lists show
 the first rows with a **Show all** button.

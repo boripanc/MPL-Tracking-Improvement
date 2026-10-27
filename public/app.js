@@ -733,7 +733,16 @@ function bucketLabel(x, unit) {
   if (unit === 'year') return x.slice(0, 4);
   return dd;
 }
-var TK_VIEWS = { all: 'All open', overdue: 'Overdue', soon: 'Due soon', unassigned: 'Unassigned' };
+var TK_VIEWS = { all: 'All open', overdue: 'Overdue', soon: 'Due soon', unassigned: 'Unassigned', quiet: 'No comment for 3+ days' };
+var QUIET_DAYS = 3;
+// Whole days since the last comment; null when the ticket has no comment.
+function daysSince(s) { return s ? Math.max(0, Math.floor((Date.now() - new Date(s)) / 86400000)) : null; }
+function sinceText(t) {
+  var n = daysSince(t.last_comment_at);
+  if (n == null) return '<span class="bad" title="No comment on this ticket yet">No comment</span>';
+  var txt = n === 0 ? 'Today' : n + (n === 1 ? ' day' : ' days');
+  return '<span class="' + (n >= 7 ? 'bad' : n >= QUIET_DAYS ? 'warn' : '') + '" title="' + esc(dtFull(t.last_comment_at)) + '">' + txt + '</span>';
+}
 
 function setTicketBadge(d) {
   var b = $('#tk-badge'), n = d && d.enabled ? d.kpi.overdue : 0;
@@ -756,6 +765,7 @@ function tkMatches(t, f, soonHours) {
   if (f.view === 'overdue' && !(due && due < now)) return false;
   if (f.view === 'soon' && !(due && due >= now && due < now + soonHours * 3600000)) return false;
   if (f.view === 'unassigned' && t.responder) return false;
+  if (f.view === 'quiet' && t.last_comment_at && daysSince(t.last_comment_at) < QUIET_DAYS) return false;
   if (f.grp && (t.grp || '(none)') !== f.grp) return false;
   if (f.responder && (t.responder || '(unassigned)') !== f.responder) return false;
   if (f.q && [t.id, t.subject, t.requester, t.entity, t.category, t.sub_category, t.item, t.status, t.pending_reason].join(' ').toLowerCase().indexOf(f.q) < 0) return false;
@@ -923,7 +933,7 @@ function renderTickets() {
   $('#tk-count').textContent = fmt(all.length) + ' of ' + fmt(k.open) + ' open tickets' + (d.open.length < k.open ? ' (the list holds the first ' + fmt(d.open.length) + ')' : '') + ', overdue first';
   if (!all.length) { $('#tk-tab').innerHTML = '<div class="empty">No open tickets match these filters.</div>'; return; }
   var rows = tkPage('open', all);
-  $('#tk-tab').innerHTML = '<table><thead><tr><th>Ticket</th><th>Subject</th><th>Category</th><th>Status</th><th>Responder</th><th class="num">Age</th><th>Due</th><th>Last comment</th></tr></thead><tbody>' +
+  $('#tk-tab').innerHTML = '<table><thead><tr><th>Ticket</th><th>Subject</th><th>Category</th><th>Status</th><th>Responder</th><th class="num">Age</th><th>Due</th><th class="num">Since last comment</th><th>Last comment</th></tr></thead><tbody>' +
     rows.map(function (t, i) {
       return '<tr class="click" data-i="' + i + '"><td class="nowrap">' + tkId(t) + (t.type ? '<div class="muted small">' + esc(t.type) + '</div>' : '') + '</td>' +
         '<td>' + esc(short(t.subject, 90)) + (t.requester || t.entity ? '<div class="muted small">' + esc([t.requester, t.entity].filter(Boolean).join(' · ')) + '</div>' : '') + '</td>' +
@@ -931,6 +941,7 @@ function renderTickets() {
         '<td>' + tkStatus(t.status) + (t.pending_reason ? '<div class="muted small">' + esc(t.pending_reason) + '</div>' : '') + '</td>' +
         '<td class="small">' + tkOwner(t) + '</td>' +
         '<td class="num nowrap">' + ageText(t.created_at) + '</td><td class="nowrap">' + dueText(t.due_by) + '</td>' +
+        '<td class="num nowrap">' + sinceText(t) + '</td>' +
         '<td class="small nowrap">' + (t.last_comment_at ? esc(dt(t.last_comment_at)) + '<div class="muted">' + esc([t.last_comment_by, t.last_comment_type].filter(Boolean).join(' · ')) + '</div>' : '<span class="muted">–</span>') + '</td></tr>';
     }).join('') + '</tbody></table>' + tkMore('open', rows.length, all.length);
   bindMore('#tk-tab', renderTickets);
@@ -1049,9 +1060,10 @@ function safeHtml(html) {
 }
 function exportTicketCsv() {
   var rows = S.cache.ticketRows || [];
-  var cols = ['id', 'subject', 'type', 'status', 'pending_reason', 'grp', 'responder', 'requester', 'entity', 'category', 'sub_category', 'item', 'created_at', 'due_by', 'updated_at', 'last_comment_at', 'last_comment_by'];
+  var cols = ['id', 'subject', 'type', 'status', 'pending_reason', 'grp', 'responder', 'requester', 'entity', 'category', 'sub_category', 'item', 'created_at', 'due_by', 'updated_at', 'last_comment_at', 'last_comment_by', 'days_since_last_comment'];
   var q = function (v) { v = v == null ? '' : String(v); return '"' + v.split('"').join('""') + '"'; };
-  var csv = cols.join(',') + NL + rows.map(function (r) { return cols.map(function (c) { return q(r[c]); }).join(','); }).join(NL);
+  var val = function (r, c) { return c === 'days_since_last_comment' ? daysSince(r.last_comment_at) : r[c]; };
+  var csv = cols.join(',') + NL + rows.map(function (r) { return cols.map(function (c) { return q(val(r, c)); }).join(','); }).join(NL);
   var a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
   a.download = 'open-tickets.csv';
