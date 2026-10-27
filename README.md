@@ -79,7 +79,7 @@ Without Docker (needs a local PostgreSQL and an empty database):
 ```bash
 export DATABASE_URL=postgres://user:pass@localhost/cpi_error_center_dev
 npm run db:seed             # creates the tables and loads sample data
-AUTH_DISABLED=true npm run dev
+HOST=127.0.0.1 AUTH_DISABLED=true npm run dev
 ```
 
 `npm run db:seed` refuses to load sample data into a database that already has messages.
@@ -95,7 +95,7 @@ All settings are environment variables (a `.env` file is read automatically). Se
 | `DB_SCHEMA` | `public` | Schema that holds the tables. |
 | `PG_POOL_MAX` | `10` | Max database connections. |
 | `APP_USERS` | – | **Required** unless auth is disabled. Comma-separated `user:password` pairs. |
-| `AUTH_DISABLED` | `false` | Local development only: no login at all. |
+| `AUTH_DISABLED` | `false` | Local development only: no login at all. Only accepted with `HOST=127.0.0.1`; on any other address the server refuses to start. |
 | `SESSION_SECRET` | (random per start) | Key that signs the session cookie. Set it so a restart does not sign everyone out. |
 | `SESSION_IDLE_MINUTES` | `60` | Sign out after this long without activity. |
 | `SESSION_MAX_HOURS` | `12` | Sign in again after this long in any case. |
@@ -103,7 +103,7 @@ All settings are environment variables (a `.env` file is read automatically). Se
 | `TRUST_PROXY` | (off) | Set to `1` behind a reverse proxy / load balancer. |
 | `DEFAULT_TZ` | `Asia/Bangkok` | Time zone for chart buckets if the browser doesn't send one. |
 
-The server will not start without `DATABASE_URL`, or without `APP_USERS` unless `AUTH_DISABLED=true`.
+The server will not start without `DATABASE_URL`, or without `APP_USERS` unless `AUTH_DISABLED=true` on `HOST=127.0.0.1`.
 
 ## Certificate expiry
 
