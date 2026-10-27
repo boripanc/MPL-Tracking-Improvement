@@ -172,6 +172,11 @@ function loadConfig(env = process.env) {
 function validateConfig(config) {
   const problems = [];
   if (!config.db.url) problems.push('DATABASE_URL is not set.');
+  // Login can only be switched off on a server that nobody else can reach.
+  if (config.auth.disabled && !/^(127[.]0[.]0[.]1|localhost|::1)$/i.test(config.host)) {
+    problems.push(`AUTH_DISABLED=true only works with HOST=127.0.0.1 (this computer only); this server listens on ${config.host}. `
+      + 'Remove AUTH_DISABLED and set APP_USERS=user:password so everyone has to sign in.');
+  }
   if (!config.auth.disabled && config.auth.users.length === 0) {
     problems.push('APP_USERS is empty. Set APP_USERS=user:password (or AUTH_DISABLED=true for local development only).');
   }

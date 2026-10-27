@@ -147,6 +147,15 @@ test('too many wrong passwords block the sign-in for a while', async () => {
   }
 });
 
+test('login cannot be switched off on a server others can reach', () => {
+  const { loadConfig, validateConfig } = require('../src/config');
+  const base = { DATABASE_URL: 'x', AUTH_DISABLED: 'true' };
+  assert.match(validateConfig(loadConfig(base)).join(), /AUTH_DISABLED=true only works with HOST=127.0.0.1/);
+  assert.match(validateConfig(loadConfig({ ...base, HOST: '10.0.0.5' })).join(), /AUTH_DISABLED/);
+  assert.deepEqual(validateConfig(loadConfig({ ...base, HOST: '127.0.0.1' })), []);
+  assert.deepEqual(validateConfig(loadConfig({ DATABASE_URL: 'x', APP_USERS: 'a:b' })), []);
+});
+
 test('serves the page, script, styles and Chart.js', async () => {
   const page = await api.call('GET', '/');
   assert.equal(page.status, 200);
