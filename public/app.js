@@ -714,6 +714,19 @@ var TP = {
   year: { label: 'Yearly', span: 'in the last 5 years', cur: 'This year', prev: 'last year' }
 };
 if (!TP[S.tp]) S.tp = 'day';
+// Monthly view: '' = trend of the last 12 months, or one month as YYYY-MM.
+S.tkMonth = '';
+function monthName(ym) { return MONTHS[+ym.slice(5, 7) - 1] + ' ' + ym.slice(0, 4); }
+function tkMonths() {
+  var out = [], d = new Date();
+  for (var i = 0; i < 13; i++) {
+    var x = new Date(d.getFullYear(), d.getMonth() - i, 1);
+    out.push(x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0'));
+  }
+  return out;
+}
+function tkPicked() { return S.tp === 'month' && S.tkMonth ? S.tkMonth : ''; }
+function tkSpan() { return tkPicked() ? 'in ' + monthName(tkPicked()) : TP[S.tp].span; }
 function syncRangeVisibility() {
   // Certificates do not depend on the period; Ticket pulse only uses it in the daily view.
   $('#range').hidden = S.tab === 'certs' || (S.tab === 'tickets' && S.tp !== 'day');
@@ -818,19 +831,20 @@ function bindRows(root, rows) {
 function loadTickets() {
   var v = $('#v-tickets');
   if (!v.innerHTML) v.innerHTML = '<div class="empty">Loading…</div>';
-  return get('api/tickets/pulse', withRange({ view: S.tp })).then(function (d) {
+  return get('api/tickets/pulse', withRange({ view: S.tp, month: tkPicked() })).then(function (d) {
     setTicketBadge(d);
     if (!d.enabled) {
       v.innerHTML = '<div class="card"><h2>Ticket pulse is not available yet</h2><p class="muted">' + esc(d.reason) + '</p></div>';
       return;
     }
     S.cache.tickets = d;
-    var span = TP[S.tp].span, open = false;
+    var span = tkSpan(), open = false;
     try { open = localStorage.getItem('cpiec-tkbreak') === '1'; } catch (e) {}
     v.innerHTML =
       '<div class="filters"><span class="muted small">View</span><div class="seg" role="group" aria-label="View">' +
         Object.keys(TP).map(function (x) { return '<button class="btn' + (x === S.tp ? ' on' : '') + '" data-tp="' + x + '" aria-pressed="' + (x === S.tp) + '">' + TP[x].label + '</button>'; }).join('') +
-      '</div><span class="muted small">' + esc(S.tp === 'day' ? 'Uses the period picker at the top.' : 'Charts and figures cover ' + span + '.') + '</span>' +
+      '</div>' + (S.tp === 'month' ? '<select id="tk-month-pick" aria-label="Month">' + opts([['', 'Last 12 months']].concat(tkMonths().map(function (m) { return [m, monthName(m)]; })), S.tkMonth) + '</select>' : '') +
+      '<span class="muted small">' + esc(S.tp === 'day' ? 'Uses the period picker at the top.' : 'Charts and figures cover ' + span + (tkPicked() ? ', per day' : '') + '.') + '</span>' +
       '<span class="sp"></span><span class="muted small">Newest ticket change ' + esc(dt(d.lastChange)) + '</span></div>' +
       (d.stale ? '<div class="card" style="margin-bottom:16px"><b class="bad">The ticket data may be out of date:</b> <span class="muted">the newest ticket change is from ' + esc(d.lastChange ? dt(d.lastChange) : 'never') + ', more than ' + d.staleHours + ' hours ago. Run the n8n workflow "FreshServices Tickets" (and check its Freshservice cookie) to refresh it.</span></div>' : '') +
       '<div class="grid kpis" id="tk-kpis"></div>' +
@@ -838,7 +852,7 @@ function loadTickets() {
         '<div class="card"><h2>Created vs. resolved <small>' + esc(span) + '</small></h2><div class="ch sm"><canvas id="c-tk-flow"></canvas></div></div>' +
         '<div class="card"><h2>Open tickets by age <small>since the ticket was created</small></h2><div class="ch sm"><canvas id="c-tk-age"></canvas></div></div>' +
       '</div>' +
-      '<h2 class="sec">This month</h2><div class="card" id="tk-month"></div>' +
+      '<h2 class="sec">' + esc(tkPicked() ? monthName(tkPicked()) : 'This month') + '</h2><div class="card" id="tk-month"></div>' +
       '<h2 class="sec">Open tickets</h2>' +
       '<div class="card"><div class="filters"><select id="tf-view" aria-label="Show"></select><select id="tf-grp" aria-label="Group"></select><select id="tf-resp" aria-label="Responder"></select>' +
         '<input id="tf-q" type="search" placeholder="Search ticket, subject, category, requester or entity" style="min-width:220px;flex:1">' +
@@ -855,6 +869,7 @@ function loadTickets() {
         '</div></details>' +
       '<p class="muted small">Freshservice tickets from the database table the n8n workflow "FreshServices Tickets" fills. Open = any status except Resolved and Closed. Tickets tagged noncharge and changes (Change Process Type Standard, Normal or Emergency) are left out everywhere on this page. Due soon = due within ' + d.dueSoonHours + ' hours (TICKETS_DUE_SOON_HOURS).</p>';
     $('#tf-q').value = S.tf.q;
+    if ($('#tk-month-pick')) $('#tk-month-pick').onchange = function () { S.tkMonth = this.value; S.tm = 'all'; loadTickets().catch(fail); };
     $('#tk-break').ontoggle = function () { try { localStorage.setItem('cpiec-tkbreak', this.open ? '1' : '0'); } catch (e) {} };
     $$('#v-tickets [data-tp]').forEach(function (b) { if (b.tagName === 'BUTTON') b.onclick = function () { if (b.dataset.tp !== S.tp) setTicketView(b.dataset.tp); }; });
     $('#tf-view').onchange = function () { S.tf.view = this.value; renderTickets(); };
@@ -876,7 +891,7 @@ function loadTickets() {
 }
 function renderMonth() {
   var d = S.cache.tickets, m = d.month, labels = closureLabels(d);
-  var name = new Date(m.start).toLocaleString(undefined, { month: 'long', year: 'numeric' });
+  var name = tkPicked() ? monthName(tkPicked()) : new Date(m.start).toLocaleString(undefined, { month: 'long', year: 'numeric' });
   var match = function (t) {
     if (S.tm === 'open') return !t.closed;
     if (S.tm === 'closed') return t.closed;
@@ -890,7 +905,7 @@ function renderMonth() {
       return '<button class="btn sm' + (x === S.tm ? ' on' : '') + '" data-tm="' + x + '" aria-pressed="' + (x === S.tm) + '">' + esc(TM_VIEWS[x]) + ' <b' + (x === 'missing' && counts[x] ? ' class="bad"' : '') + '>' + fmt(counts[x]) + '</b></button>';
     }).join('') + '</div></div>';
   if (!all.length) {
-    html += '<div class="empty">' + (m.created ? 'No tickets this month match this filter.' : 'No tickets were created this month yet.') + '</div>';
+    html += '<div class="empty">' + (m.created ? 'No tickets this month match this filter.' : (tkPicked() ? 'No tickets were created in ' + esc(name) + '.' : 'No tickets were created this month yet.')) + '</div>';
   } else {
     html += '<div class="scroll"><table><thead><tr><th>Ticket</th><th>Subject</th><th>Category</th><th>Status</th><th>Responder</th><th>Created</th><th>Closure notes</th></tr></thead><tbody>' +
       rows.map(function (t, i) {
@@ -918,7 +933,7 @@ function renderTickets() {
     tkKpi('soon', 'Due soon', fmt(k.dueSoon), 'due within ' + d.dueSoonHours + ' hours', k.dueSoon ? 'warn' : '') +
     tkKpi('unassigned', 'Unassigned', fmt(k.unassigned), 'open, no responder', k.unassigned ? 'warn' : '') +
     createdKpi(d) +
-    tkKpi('', 'First response', k.frtMedianH == null ? '–' : k.frtMedianH + ' h', 'median, tickets created ' + TP[S.tp].span, '');
+    tkKpi('', 'First response', k.frtMedianH == null ? '–' : k.frtMedianH + ' h', 'median, tickets created ' + tkSpan(), '');
   $$('#tk-kpis [data-tv]').forEach(function (el) {
     var go = function () { S.tf.view = el.dataset.tv; renderTickets(); $('#tk-tab').scrollIntoView({ behavior: 'smooth', block: 'start' }); };
     el.onclick = go;
@@ -953,7 +968,7 @@ function closureLabels(d) {
   return labels;
 }
 function renderClosure() {
-  var d = S.cache.tickets, c = d.closure, span = TP[S.tp].span, labels = closureLabels(d);
+  var d = S.cache.tickets, c = d.closure, span = tkSpan(), labels = closureLabels(d);
   var scope = c.groups && c.groups.length ? ' in ' + c.groups.join(', ') : '';
   var head = '<h2>Resolved / closed tickets' + esc(scope) + ' missing closure notes <small>' + esc(span) + '; each needs ' + esc(c.fields.map(function (f) { return f.label; }).join(', ')) + '</small></h2>';
   if (!c.stored) {
@@ -977,6 +992,9 @@ function renderClosure() {
 }
 function createdKpi(d) {
   var k = d.kpi, net = k.created - k.resolved, tp = TP[S.tp];
+  if (tkPicked()) {
+    return tkKpi('', 'Created in ' + monthName(tkPicked()), fmt(k.created), fmt(k.resolved) + ' resolved (' + (net > 0 ? '+' : '') + fmt(net) + ' net)', '');
+  }
   if (S.tp === 'day' || !d.series.length) {
     return tkKpi('', 'Created', fmt(k.created), 'in period · ' + fmt(k.resolved) + ' resolved (' + (net > 0 ? '+' : '') + fmt(net) + ' net)', '');
   }

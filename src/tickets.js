@@ -125,7 +125,7 @@ function createTicketStore({ pool, config }) {
 
   // view: '' (the selected period, per day or hour) or 'week' / 'month' / 'year' (the last BUCKETS[view] weeks,
   // months or years up to now, one bar each).
-  async function pulse({ from, to, tz, view = '' }) {
+  async function pulse({ from, to, tz, view = '', month = '' }) {
     const src = await source();
     if (!src.ok) return { enabled: false, reason: src.reason };
     const sql = `WITH p AS (SELECT $1::jsonb AS j),
@@ -134,34 +134,42 @@ rng0 AS (
          COALESCE(NULLIF(j->>'to', '')::timestamptz, now()) AS t,
          COALESCE(NULLIF(j->>'tz', ''), 'Asia/Bangkok') AS tz,
          (j->>'soonHours')::int AS soon,
-         NULLIF(j->>'view', '') AS view, (j->>'buckets')::int AS n
+         NULLIF(j->>'view', '') AS view, (j->>'buckets')::int AS n,
+         NULLIF(j->>'month', '') AS mo
   FROM p),
 -- Groups checked for closure notes; an empty list means every group.
 cg AS (SELECT ARRAY(SELECT lower(btrim(x)) FROM jsonb_array_elements_text(j->'closureGroups') x) AS g FROM p),
-rng AS (
-  SELECT CASE WHEN view IS NULL THEN f
-              ELSE (date_trunc(view, now() AT TIME ZONE tz) - ((n - 1) || ' ' || view)::interval) AT TIME ZONE tz END AS f,
-         CASE WHEN view IS NULL THEN t ELSE now() END AS t,
-         tz, soon, view
+-- month (YYYY-MM): one calendar month, per day. ms / me: the month the "This month" list shows.
+rng1 AS (
+  SELECT rng0.*, COALESCE((mo || '-01')::timestamp, date_trunc('month', now() AT TIME ZONE tz)) AT TIME ZONE tz AS ms
   FROM rng0),
+rng AS (
+  SELECT CASE WHEN mo IS NOT NULL THEN ms
+              WHEN view IS NULL THEN f
+              ELSE (date_trunc(view, now() AT TIME ZONE tz) - ((n - 1) || ' ' || view)::interval) AT TIME ZONE tz END AS f,
+         CASE WHEN mo IS NOT NULL THEN least(now(), ((mo || '-01')::timestamp + interval '1 month') AT TIME ZONE tz)
+              WHEN view IS NULL THEN t ELSE now() END AS t,
+         tz, soon, CASE WHEN mo IS NULL THEN view END AS view, mo, ms,
+         ((ms AT TIME ZONE tz) + interval '1 month') AT TIME ZONE tz AS me
+  FROM rng1),
 ${tk(src)},
 o AS (SELECT tk.*, now() - created_at AS age FROM tk WHERE NOT closed),
 created AS (SELECT tk.* FROM tk, rng WHERE created_at >= rng.f AND created_at < rng.t),
 resolved AS (SELECT tk.* FROM tk, rng WHERE closed AND updated_at >= rng.f AND updated_at < rng.t),
 incomplete AS (SELECT r.*, ${missing('r')} AS missing FROM resolved r, cg
   WHERE cardinality(cg.g) = 0 OR lower(btrim(r.grp)) = ANY (cg.g)),
--- Every ticket created this calendar month (in the viewer's time zone), whatever the view.
+-- Every ticket created in the chosen calendar month (this month by default; viewer's time zone), whatever the view.
 mon AS (
   SELECT m.*, CASE WHEN m.closed AND (cardinality(cg.g) = 0 OR lower(btrim(m.grp)) = ANY (cg.g)) THEN ${missing('m')} END AS missing
   FROM tk m, rng, cg
-  WHERE m.created_at >= date_trunc('month', now() AT TIME ZONE rng.tz) AT TIME ZONE rng.tz),
-b AS (SELECT COALESCE(view, CASE WHEN t - f <= interval '3 days' THEN 'hour' ELSE 'day' END) AS unit FROM rng),
+  WHERE m.created_at >= rng.ms AND m.created_at < rng.me),
+b AS (SELECT COALESCE(view, CASE WHEN mo IS NULL AND t - f <= interval '3 days' THEN 'hour' ELSE 'day' END) AS unit FROM rng),
 buckets AS (
-  SELECT generate_series(date_trunc(b.unit, rng.f AT TIME ZONE rng.tz), date_trunc(b.unit, rng.t AT TIME ZONE rng.tz),
+  SELECT generate_series(date_trunc(b.unit, rng.f AT TIME ZONE rng.tz), date_trunc(b.unit, (rng.t - interval '1 microsecond') AT TIME ZONE rng.tz),
                          ('1 ' || b.unit)::interval) AS bk
   FROM rng, b)
 SELECT json_build_object(
-  'range', (SELECT json_build_object('from', f, 'to', t, 'unit', (SELECT unit FROM b)) FROM rng),
+  'range', (SELECT json_build_object('from', f, 'to', t, 'unit', (SELECT unit FROM b), 'month', mo) FROM rng),
   'lastChange', (SELECT max(updated_at) FROM tk),
   'total', (SELECT count(*) FROM tk),
   'kpi', json_build_object(
@@ -204,7 +212,7 @@ SELECT json_build_object(
         SELECT id, subject, status, grp, responder, updated_at AS closed_at, missing FROM incomplete
         WHERE cardinality(missing) > 0 ORDER BY updated_at DESC LIMIT 500) x)),
   'month', json_build_object(
-    'start', (SELECT date_trunc('month', now() AT TIME ZONE tz) AT TIME ZONE tz FROM rng),
+    'start', (SELECT ms FROM rng),
     'created', (SELECT count(*) FROM mon),
     'open', (SELECT count(*) FROM mon WHERE NOT closed),
     'closed', (SELECT count(*) FROM mon WHERE closed),
@@ -220,7 +228,7 @@ SELECT json_build_object(
       ORDER BY (due_by < now()) DESC NULLS LAST, due_by NULLS LAST, created_at
       LIMIT 1000) x)
 ) AS result`;
-    const { rows } = await pool.query(sql, [JSON.stringify({ from, to, tz, view, buckets: BUCKETS[view] || 0, soonHours: config.tickets.dueSoonHours, closureGroups: config.tickets.closureGroups || [] })]);
+    const { rows } = await pool.query(sql, [JSON.stringify({ from, to, tz, view, month, buckets: BUCKETS[view] || 0, soonHours: config.tickets.dueSoonHours, closureGroups: config.tickets.closureGroups || [] })]);
     const data = rows[0].result;
     data.open.forEach((t) => { t.link = ticketLink(config.tickets.linkTemplate, t.id); });
     data.closure.stored = src.closureStored;

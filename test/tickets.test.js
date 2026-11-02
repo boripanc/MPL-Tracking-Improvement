@@ -212,3 +212,20 @@ test('closure notes are checked only for the configured groups (default L2 DDAI 
     await edi.close();
   }
 });
+
+test('monthly view can show one chosen month, per day', async () => {
+  const now = new Date();
+  const last = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15));
+  const ym = last.toISOString().slice(0, 7);
+  await db.pool.query(`INSERT INTO tickets (human_display_id, status_name, "group", created_at, updated_at)
+    VALUES ('INC-301', 'Closed', 'EDI Support', $1, $1)`, [ym + '-15T05:00:00Z']);
+  const d = (await api.call('GET', `/api/tickets/pulse?view=month&month=${ym}&tz=Asia/Bangkok`)).body;
+  assert.equal(d.range.unit, 'day');
+  assert.equal(d.range.month, ym);
+  const days = new Date(Date.UTC(+ym.slice(0, 4), +ym.slice(5, 7), 0)).getUTCDate();
+  assert.equal(d.series.length, days);
+  assert.ok(d.month.rows.some((r) => r.id === 'INC-301'));
+  assert.equal(d.kpi.created, d.series.reduce((s, p) => s + p.created, 0));
+  assert.ok(d.kpi.resolved >= 1);
+  assert.equal((await api.call('GET', '/api/tickets/pulse?view=month&month=2026-13')).status, 400);
+});
