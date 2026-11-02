@@ -167,6 +167,8 @@ the first rows with a **Show all** button.
 The **View** switch at the top picks **Daily** (the period picker), **Weekly** (last 12 weeks), **Monthly**
 (last 12 months) or **Yearly** (last 5 years) for the created vs. resolved chart, the created / resolved KPI
 (this week, month or year next to the previous one), first response time and top sub-categories.
+In **Monthly**, a month picker next to the switch opens one of the last 13 months instead of the 12-month trend:
+the chart shows that month per day, and the KPIs, closure notes and the month's ticket list cover that month.
 
 It reads the `tickets` table that the **n8n workflow "FreshServices Tickets"** fills (one row per ticket, keyed by
 `human_display_id`). The app only reads it and does not create it. Open = any status except Resolved and Closed.
@@ -325,7 +327,7 @@ All endpoints are under `/api`, require login and return JSON. Errors return `{ 
 | `POST /api/test-match` | `{ kind: "like" \| "regex", pattern, flow }` → matches in the last 30 days |
 | `GET /api/certificates` | Keystore entries from the database with `state` (expired / critical / warning / ok / unknown), `daysLeft`, a summary and the last sync. `?removed=1` includes removed entries |
 | `POST /api/certificates/sync` | Copy the keystore from CPI into the database now (only when this server has a CPI connection; otherwise 409) |
-| `GET /api/tickets/pulse` | Ticket pulse: KPIs, created vs. resolved, backlog breakdowns and the open tickets (`from`, `to`, `tz`, or `view=week` / `month` / `year` for the last 12 weeks, 12 months or 5 years) |
+| `GET /api/tickets/pulse` | Ticket pulse: KPIs, created vs. resolved, backlog breakdowns and the open tickets (`from`, `to`, `tz`, or `view=week` / `month` / `year` for the last 12 weeks, 12 months or 5 years; `month=YYYY-MM` for one month, per day) |
 | `GET /api/tickets/:id` | One ticket with description, tags and last comment |
 | `GET /api/cpi/check` | Step-by-step CPI connection test (no secrets in the result) |
 | `GET /healthz` | Database check (no login) |

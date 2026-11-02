@@ -330,7 +330,9 @@ function apiRouter({ pool, config, certificates, tickets, kanban }) {
   router.get('/tickets/pulse', handle((req) => {
     const view = req.query.view || '';
     if (!['', 'day', 'week', 'month', 'year'].includes(view)) throw new HttpError(400, 'view must be day, week, month or year');
-    return tickets.pulse({ ...range(req.query, config), view: view === 'day' ? '' : view });
+    const month = req.query.month || '';
+    if (month && !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new HttpError(400, 'month must look like 2026-10');
+    return tickets.pulse({ ...range(req.query, config), view: view === 'day' ? '' : view, month });
   }));
 
   router.get('/tickets/:id', handle(async (req) => {
