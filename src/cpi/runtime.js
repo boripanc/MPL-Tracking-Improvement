@@ -1,11 +1,12 @@
 'use strict';
 
 /*
- * Locks and Message queues menus. CPI lock entries (Monitor > Manage Locks, OData "Locks") and JMS queues
+ * Locks and Message queues menus. CPI design-time artifact locks (Monitor > Manage Design-Time Artifact Locks,
+ * OData "IntegrationDesigntimeLocks") and JMS queues
  * (Monitor > Message Queues, OData "Queues", "JmsBrokers('Broker1')", "Queues('<name>')/Messages") are copied
- * into the database (tables cpi_locks, cpi_jms_queues, cpi_jms_messages, cpi_runtime_sync) by the n8n workflow
+ * into the database (tables cpi_designtime_locks, cpi_jms_queues, cpi_jms_messages, cpi_runtime_sync) by the n8n workflow
  * "CPI Locks & Queues → Postgres" or by this app's own sync. The web pages always read from the database.
- * This is read-only: releasing a lock or retrying a queued message is still done in CPI.
+ * This is read-only: unlocking an artifact or retrying a queued message is still done in CPI.
  */
 
 const SQL = require('../sql');
@@ -77,7 +78,7 @@ async function fetchRuntime(client, { concurrency = 5 } = {}) {
       return null;
     }
   };
-  const locks = await attempt('locks', () => readAll(client, '/Locks', 'locks'));
+  const locks = await attempt('locks', () => readAll(client, '/IntegrationDesigntimeLocks', 'design-time locks'));
   // A tenant without JMS has no broker (404); that just means there are no queues.
   const broker = await attempt('broker', async () => {
     try {
@@ -104,22 +105,22 @@ async function fetchRuntime(client, { concurrency = 5 } = {}) {
   return { locks, broker, queues, messages, errors };
 }
 
-function lockFromRow(r, now) {
-  const expiresAt = iso(r.expires_at);
+function lockFromRow(r, now, warnHours = 24) {
   const createdAt = iso(r.created_at);
-  let state = 'active';
+  const ageMinutes = createdAt ? Math.max(0, Math.floor((now - Date.parse(createdAt)) / 60000)) : null;
+  let state = 'locked';
   if (r.released_at) state = 'released';
-  else if (expiresAt && Date.parse(expiresAt) <= now) state = 'expired';
+  else if (ageMinutes != null && ageMinutes >= warnHours * 60) state = 'old';
   return {
-    component: r.component || '',
-    source: r.source || '',
-    entry: r.entry || '',
-    lockName: r.lock_name || '',
-    hexSource: r.hex_source,
-    hexEntry: r.hex_entry,
+    id: r.resource_id,
+    artifactId: r.artifact_id || '',
+    artifactName: r.artifact_name || r.artifact_id || '',
+    artifactType: r.artifact_type || '',
+    packageId: r.package_id || '',
+    packageName: r.package_name || r.package_id || '',
+    lockedBy: r.created_by || '',
     createdAt,
-    expiresAt,
-    ageMinutes: createdAt ? Math.max(0, Math.floor((now - Date.parse(createdAt)) / 60000)) : null,
+    ageMinutes,
     firstSeenAt: iso(r.first_seen_at),
     lastSeenAt: iso(r.last_seen_at),
     releasedAt: iso(r.released_at),
@@ -186,7 +187,7 @@ const missingTables = 'The lock and queue tables do not exist yet. Run "npm run 
  *  - locks() / queues() / queue(name): read from the database
  *  - sync(): copy locks and queues from CPI into the database (only when `client` is given)
  */
-function createRuntimeStore({ pool, client = null, staleMinutes = 60, now = () => Date.now() }) {
+function createRuntimeStore({ pool, client = null, staleMinutes = 60, lockWarnHours = 24, now = () => Date.now() }) {
   let syncing = null;
 
   async function query(sql, params) {
@@ -210,13 +211,15 @@ function createRuntimeStore({ pool, client = null, staleMinutes = 60, now = () =
     const data = await query(SQL.readLocks, { releasedDays });
     if (!data) return { enabled: false, reason: missingTables };
     const t = now();
-    const items = data.items.map((r) => lockFromRow(r, t));
-    const summary = { active: 0, expired: 0, released: 0, components: {} };
+    const items = data.items.map((r) => lockFromRow(r, t, lockWarnHours));
+    const summary = { locked: 0, old: 0, released: 0, types: {}, people: {} };
     for (const l of items) {
       summary[l.state]++;
-      if (l.state !== 'released') summary.components[l.component] = (summary.components[l.component] || 0) + 1;
+      if (l.state === 'released') continue;
+      summary.types[l.artifactType || 'Other'] = (summary.types[l.artifactType || 'Other'] || 0) + 1;
+      if (l.lockedBy) summary.people[l.lockedBy] = (summary.people[l.lockedBy] || 0) + 1;
     }
-    return { enabled: true, ...syncInfo(data.lastSync, t), summary, items };
+    return { enabled: true, ...syncInfo(data.lastSync, t), warnHours: lockWarnHours, summary, items };
   }
 
   async function queues({ includeRemoved = false } = {}) {
@@ -291,7 +294,7 @@ function startRuntimeSync({ store, intervalMinutes, logger = console }) {
   const tick = async () => {
     try {
       const r = await store.sync({ source: 'app' });
-      logger.log(`[locks/queues] synced ${r.locks} locks and ${r.queues} queues (${r.messages} messages) from CPI`
+      logger.log(`[locks/queues] synced ${r.locks} design-time locks and ${r.queues} queues (${r.messages} messages) from CPI`
         + (r.errors.length ? `; problems: ${r.errors.join('; ')}` : ''));
     } catch (err) {
       logger.error('[locks/queues] sync failed:', err.message);

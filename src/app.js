@@ -59,7 +59,7 @@ function createApp({ pool, config, certificates, runtime, tickets, kanban }) {
   if (!kanban) kanban = createKanban(config.kanban, { pool });
   const app = express();
   const cpiClient = cpiConfigured(config) ? createClient(config.poller) : null;
-  if (!runtime) runtime = createRuntimeStore({ pool, client: cpiClient, staleMinutes: config.runtime.staleMinutes });
+  if (!runtime) runtime = createRuntimeStore({ pool, client: cpiClient, staleMinutes: config.runtime.staleMinutes, lockWarnHours: config.runtime.lockWarnHours });
   if (!certificates) {
     certificates = createCertificateStore({
       pool,

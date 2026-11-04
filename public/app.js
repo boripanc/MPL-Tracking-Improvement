@@ -708,10 +708,10 @@ function exportCertCsv() {
 }
 
 /* ---------- Locks and Message queues (CPI runtime, from the database) ---------- */
-var LOCK_STATES = { active: 'Locked', expired: 'Past expiry', released: 'Released' };
+var LOCK_STATES = { locked: 'Locked', old: 'Locked a long time', released: 'Unlocked' };
 var Q_STATES = { full: 'Full', critical: 'Nearly full', failed: 'Failed messages', inactive: 'Inactive', waiting: 'Messages waiting', ok: 'OK', removed: 'Removed' };
 var Q_PILL = { full: 'cert-expired', critical: 'cert-critical', failed: 'cert-critical', inactive: 'cert-warning', waiting: 'tk', ok: 'cert-ok', removed: '' };
-S.lf = { state: '', component: '', q: '', released: false };
+S.lf = { state: '', type: '', who: '', q: '', released: false };
 S.qf = { state: '', q: '', busy: false, removed: false };
 
 function ago(min) {
@@ -730,7 +730,7 @@ function bytes(n) {
 function setBadge(id, n, title) { var b = $(id); b.textContent = n > 99 ? '99+' : String(n); b.hidden = !n; if (title) b.title = title; }
 function setRuntimeBadges(kind, d) {
   if (!d || !d.enabled) return;
-  if (kind === 'locks') setBadge('#lock-badge', d.summary.expired);
+  if (kind === 'locks') setBadge('#lock-badge', d.summary.old);
   else setBadge('#queue-badge', d.summary.failed + d.summary.full + d.summary.critical);
 }
 function staleBox(d, what) {
@@ -769,25 +769,25 @@ function downloadCsv(name, cols, rows) {
   toast('Exported ' + rows.length + ' rows');
 }
 
-/* Locks */
-function lockPill(l) { return '<span class="pill ' + ({ active: 'tk', expired: 'cert-critical', released: '' })[l.state] + '">' + esc(LOCK_STATES[l.state]) + '</span>'; }
+/* Locks (design-time artifact locks) */
+function lockPill(l) { return '<span class="pill ' + ({ locked: 'tk', old: 'cert-critical', released: '' })[l.state] + '">' + esc(LOCK_STATES[l.state]) + '</span>'; }
 function loadLocks() {
   var v = $('#v-locks');
   if (!$('#lk-tab', v)) {
     v.innerHTML = '<div class="grid kpis" id="lk-kpis"></div>' +
-      '<div class="filters mt"><select id="lf-state" aria-label="Status"></select><select id="lf-comp" aria-label="Component"></select>' +
-      '<input id="lf-q" type="search" placeholder="Search source or entry (file, aggregator, …)" style="min-width:240px;flex:1">' +
-      '<label class="check"><input type="checkbox" id="lf-rel"> Show released (last 7 days)</label>' +
+      '<div class="filters mt"><select id="lf-state" aria-label="Status"></select><select id="lf-type" aria-label="Artifact type"></select><select id="lf-who" aria-label="Locked by"></select>' +
+      '<input id="lf-q" type="search" placeholder="Search artifact or package" style="min-width:240px;flex:1">' +
+      '<label class="check"><input type="checkbox" id="lf-rel"> Show unlocked (last 7 days)</label>' +
       '<button class="btn" id="lf-csv">Export CSV</button><button class="btn" id="lf-sync" hidden>Sync from CPI now</button></div>' +
       '<div id="lk-stale"></div>' +
       '<div class="card"><div class="row" style="margin-bottom:8px"><b id="lk-count"></b><span class="sp"></span><span class="muted small" id="lk-synced"></span></div><div class="scroll" id="lk-tab"></div></div>' +
-      '<p class="muted small">Lock entries from CPI (Monitor → Integrations and APIs → Manage Locks → Lock Entries), for example a file an SFTP sender is reading or an aggregation in progress. ' +
-      '"Past expiry" = still locked after its expiry time, which usually means a stuck lock. This page only shows locks; release them in CPI. The data comes from the database, which the n8n workflow "CPI Locks &amp; Queues → Postgres" fills.</p>';
+      '<p class="muted small" id="lk-note"></p>';
     $('#lf-state').onchange = function () { S.lf.state = this.value; renderLocks(); };
-    $('#lf-comp').onchange = function () { S.lf.component = this.value; renderLocks(); };
+    $('#lf-type').onchange = function () { S.lf.type = this.value; renderLocks(); };
+    $('#lf-who').onchange = function () { S.lf.who = this.value; renderLocks(); };
     $('#lf-q').oninput = function () { S.lf.q = this.value.trim().toLowerCase(); renderLocks(); };
     $('#lf-rel').onchange = function () { S.lf.released = this.checked; loadLocks().catch(fail); };
-    $('#lf-csv').onclick = function () { downloadCsv('cpi-locks.csv', ['state', 'component', 'source', 'entry', 'lockName', 'createdAt', 'expiresAt', 'ageMinutes', 'releasedAt'], S.cache.lockRows || []); };
+    $('#lf-csv').onclick = function () { downloadCsv('cpi-designtime-locks.csv', ['state', 'artifactName', 'artifactId', 'artifactType', 'packageName', 'lockedBy', 'createdAt', 'ageMinutes', 'releasedAt'], S.cache.lockRows || []); };
     $('#lf-sync').onclick = function () { syncRuntime(this, loadLocks); };
   }
   $('#lk-tab').innerHTML = '<div class="empty">Loading…</div>';
@@ -802,50 +802,61 @@ function renderLocks() {
   var d = S.cache.locks, f = S.lf, sum = d.summary;
   var current = d.items.filter(function (l) { return l.state !== 'released'; });
   var oldest = current.reduce(function (m, l) { return l.ageMinutes != null && l.ageMinutes > m ? l.ageMinutes : m; }, -1);
-  var comps = Object.keys(sum.components).sort();
+  var types = Object.keys(sum.types).sort(), people = Object.keys(sum.people).sort();
+  LOCK_STATES.old = 'Locked over ' + d.warnHours + ' h';
   $('#lk-kpis').innerHTML =
-    pickKpi('lf', 'current', 'Locked now', fmt(sum.active + sum.expired), comps.map(function (c) { return c + ' ' + sum.components[c]; }).join(' · ') || 'nothing locked', '') +
-    pickKpi('lf', 'expired', 'Past expiry', fmt(sum.expired), 'probably stuck, check in CPI', sum.expired ? 'alert' : 'good') +
-    '<div class="card kpi"><div class="l">Oldest lock</div><div class="v">' + esc(oldest < 0 ? '–' : ago(oldest)) + '</div><div class="s">time since it was locked</div></div>' +
-    (f.released ? pickKpi('lf', 'released', 'Released', fmt(sum.released), 'in the last 7 days', '') : '');
+    pickKpi('lf', 'current', 'Locked artifacts', fmt(sum.locked + sum.old), types.map(function (t) { return t + ' ' + sum.types[t]; }).join(' · ') || 'nothing is locked', '') +
+    pickKpi('lf', 'old', 'Locked over ' + d.warnHours + ' hours', fmt(sum.old), 'probably forgotten, ask the person to unlock', sum.old ? 'alert' : 'good') +
+    '<div class="card kpi"><div class="l">Oldest lock</div><div class="v">' + esc(oldest < 0 ? '–' : ago(oldest)) + '</div><div class="s">time since the artifact was locked</div></div>' +
+    '<div class="card kpi"><div class="l">People holding locks</div><div class="v">' + fmt(people.length) + '</div><div class="s">' + esc(people.slice(0, 3).join(', ') + (people.length > 3 ? ', …' : '')) + '</div></div>' +
+    (f.released ? pickKpi('lf', 'released', 'Unlocked', fmt(sum.released), 'in the last 7 days', '') : '');
   kpiPick('#lk-kpis', 'lf', f.state, renderLocks);
-  $('#lf-state').innerHTML = opts([['', 'All statuses'], ['current', 'Locked now'], ['active', 'Locked (within expiry)'], ['expired', 'Past expiry'], ['released', 'Released']], f.state);
-  var allComps = [];
-  d.items.forEach(function (l) { if (allComps.indexOf(l.component) < 0) allComps.push(l.component); });
-  $('#lf-comp').innerHTML = opts([['', 'All components']].concat(allComps.sort().map(function (c) { return [c, c]; })), f.component);
+  $('#lf-state').innerHTML = opts([['', 'All statuses'], ['current', 'Locked now'], ['locked', 'Locked under ' + d.warnHours + ' h'], ['old', 'Locked over ' + d.warnHours + ' h'], ['released', 'Unlocked']], f.state);
+  var allTypes = [], allPeople = [];
+  d.items.forEach(function (l) {
+    if (l.artifactType && allTypes.indexOf(l.artifactType) < 0) allTypes.push(l.artifactType);
+    if (l.lockedBy && allPeople.indexOf(l.lockedBy) < 0) allPeople.push(l.lockedBy);
+  });
+  $('#lf-type').innerHTML = opts([['', 'All artifact types']].concat(allTypes.sort().map(function (t) { return [t, t]; })), f.type);
+  $('#lf-who').innerHTML = opts([['', 'Locked by anyone']].concat(allPeople.sort().map(function (t) { return [t, t]; })), f.who);
   $('#lf-rel').checked = f.released;
   $('#lf-sync').hidden = !d.canSync;
   $('#lk-synced').textContent = syncedText(d);
   $('#lk-stale').innerHTML = staleBox(d, 'lock');
+  $('#lk-note').textContent = 'Design-time artifact locks from CPI (Monitor → Integrations and APIs → Manage Design-Time Artifact Locks): an iFlow, value mapping, script collection or other artifact that someone opened for editing, so nobody else can change it. ' +
+    'Locks held for ' + d.warnHours + ' hours or more are flagged (LOCK_WARN_HOURS). This page only shows locks; unlock artifacts in CPI. The data comes from the database, which the n8n workflow "CPI Locks & Queues → Postgres" fills.';
   var rows = d.items.filter(function (l) {
     if (f.state === 'current' && l.state === 'released') return false;
     if (f.state && f.state !== 'current' && l.state !== f.state) return false;
-    if (f.component && l.component !== f.component) return false;
-    if (f.q && [l.source, l.entry, l.lockName].join(' ').toLowerCase().indexOf(f.q) < 0) return false;
+    if (f.type && l.artifactType !== f.type) return false;
+    if (f.who && l.lockedBy !== f.who) return false;
+    if (f.q && [l.artifactName, l.artifactId, l.packageName, l.packageId].join(' ').toLowerCase().indexOf(f.q) < 0) return false;
     return true;
   });
   S.cache.lockRows = rows;
   $('#lk-count').textContent = fmt(rows.length) + ' of ' + fmt(d.items.length) + ' locks';
-  if (!rows.length) { $('#lk-tab').innerHTML = '<div class="empty">' + (d.items.length ? 'No locks match these filters.' : 'No locks in CPI right now.') + '</div>'; return; }
-  $('#lk-tab').innerHTML = '<table><thead><tr><th>Status</th><th>Component</th><th>Source</th><th>Entry</th><th>Locked since</th><th class="num">Age</th><th>Expires</th></tr></thead><tbody>' +
+  if (!rows.length) { $('#lk-tab').innerHTML = '<div class="empty">' + (d.items.length ? 'No locks match these filters.' : 'No artifact is locked in CPI right now.') + '</div>'; return; }
+  $('#lk-tab').innerHTML = '<table><thead><tr><th>Status</th><th>Artifact</th><th>Type</th><th>Package</th><th>Locked by</th><th>Locked since</th><th class="num">Locked for</th></tr></thead><tbody>' +
     rows.map(function (l, i) {
-      return '<tr class="click" data-i="' + i + '"><td>' + lockPill(l) + '</td><td class="nowrap">' + esc(l.component) + '</td><td class="small">' + esc(l.source) + '</td>' +
-        '<td class="mono">' + esc(l.entry || l.lockName) + '</td><td class="nowrap">' + dt(l.createdAt) + '</td>' +
-        '<td class="num nowrap' + (l.state === 'expired' ? ' bad' : '') + '">' + esc(ago(l.ageMinutes)) + '</td><td class="nowrap">' + (l.releasedAt ? '<span class="muted">released ' + dt(l.releasedAt) + '</span>' : dt(l.expiresAt)) + '</td></tr>';
+      return '<tr class="click" data-i="' + i + '"><td>' + lockPill(l) + '</td><td><b>' + esc(l.artifactName) + '</b>' + (l.artifactId && l.artifactId !== l.artifactName ? '<div class="muted small">' + esc(l.artifactId) + '</div>' : '') + '</td>' +
+        '<td class="nowrap">' + esc(l.artifactType) + '</td><td class="small">' + esc(l.packageName) + '</td><td class="nowrap">' + esc(l.lockedBy) + '</td>' +
+        '<td class="nowrap">' + dt(l.createdAt) + '</td>' +
+        '<td class="num nowrap' + (l.state === 'old' ? ' bad' : '') + '">' + (l.releasedAt ? '<span class="muted">unlocked ' + dt(l.releasedAt) + '</span>' : esc(ago(l.ageMinutes))) + '</td></tr>';
     }).join('') + '</tbody></table>';
   $$('#lk-tab tr[data-i]').forEach(function (t) { t.onclick = function () { openLock(rows[+t.dataset.i]); }; });
 }
 function openLock(l) {
-  openDrawer(drawerHead('Lock: ' + l.component) +
-    '<div class="row" style="margin-bottom:12px">' + lockPill(l) + '<span class="muted">locked ' + esc(ago(l.ageMinutes)) + ' ago</span></div>' +
+  openDrawer(drawerHead('Lock: ' + l.artifactName) +
+    '<div class="row" style="margin-bottom:12px">' + lockPill(l) + '<span class="muted">locked ' + esc(ago(l.ageMinutes)) + ' ago by ' + esc(l.lockedBy || 'unknown') + '</span></div>' +
     '<div class="kv">' +
-      kv('Component', esc(l.component)) + kv('Source', '<span class="mono">' + esc(l.source) + '</span>') +
-      kv('Entry', '<span class="mono">' + esc(l.entry) + '</span>') + kv('Lock name', esc(l.lockName)) +
-      kv('Locked since', esc(dtFull(l.createdAt))) + kv('Expires', '<b>' + esc(dtFull(l.expiresAt)) + '</b>') +
+      kv('Artifact', '<b>' + esc(l.artifactName) + '</b>') + kv('Artifact ID', '<span class="mono">' + esc(l.artifactId) + '</span>') +
+      kv('Type', esc(l.artifactType)) + kv('Package', esc(l.packageName) + (l.packageId && l.packageId !== l.packageName ? ' <span class="muted mono">(' + esc(l.packageId) + ')</span>' : '')) +
+      kv('Locked by', '<b>' + esc(l.lockedBy) + '</b>') + kv('Locked since', esc(dtFull(l.createdAt))) +
+      kv('Resource ID', '<span class="mono">' + esc(l.id) + '</span>') +
       kv('First seen', esc(dtFull(l.firstSeenAt))) + kv('Last seen in CPI', esc(dtFull(l.lastSeenAt))) +
-      (l.releasedAt ? kv('Released', '<b>' + esc(dtFull(l.releasedAt)) + '</b>') : '') +
+      (l.releasedAt ? kv('Unlocked', '<b>' + esc(dtFull(l.releasedAt)) + '</b>') : '') +
     '</div>' +
-    '<p class="muted small" style="margin-top:20px">To release a stuck lock, open Integration Suite → Monitor → Integrations and APIs → Manage Locks → Lock Entries, find this entry and choose Release. It disappears here after the next sync.</p>');
+    '<p class="muted small" style="margin-top:20px">Ask ' + esc(l.lockedBy || 'the person') + ' to save or cancel the edit. An administrator can also unlock it in Integration Suite → Monitor → Integrations and APIs → Manage Design-Time Artifact Locks (unsaved changes are lost). It disappears here after the next sync.</p>');
 }
 
 /* Message queues */

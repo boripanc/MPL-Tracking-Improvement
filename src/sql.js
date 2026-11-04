@@ -278,7 +278,7 @@ SELECT json_build_object(
       ORDER BY valid_to NULLS LAST, alias) k)
 ) AS result`;
 
-/* ---------- Locks and JMS message queues (CPI runtime, stored in the database) ---------- */
+/* ---------- Design-time artifact locks and JMS message queues (stored in the database) ---------- */
 
 // Epoch milliseconds ("1793279156662"), OData "/Date(ms)/" or an ISO string; 0 and empty mean "none".
 const msTs = (x) => `CASE WHEN COALESCE(${x}, '') IN ('', '0') THEN NULL
@@ -288,7 +288,7 @@ const msTs = (x) => `CASE WHEN COALESCE(${x}, '') IN ('', '0') THEN NULL
 const odataInt = (x) => `CASE WHEN ${x} ~ '^-?[0-9]+$' THEN (${x})::bigint END`;
 const odataBool = (x) => `CASE WHEN ${x} IN ('1', 'true') THEN true WHEN ${x} IN ('0', 'false') THEN false END`;
 
-// $1 = { source, locks: [raw Locks] | null, broker: {raw JmsBroker} | null, queues: [raw Queues + Artifacts] | null }.
+// $1 = { source, locks: [raw IntegrationDesigntimeLocks] | null, broker: {raw JmsBroker} | null, queues: [raw Queues + Artifacts] | null }.
 // null (or missing) means "CPI did not answer this time": that part is left as it is. An empty list means
 // "there are none": every stored lock is marked released / every queue removed. Messages of queues that are
 // now empty or gone are deleted; the messages themselves are stored by syncQueueMessages.
@@ -296,32 +296,30 @@ const odataBool = (x) => `CASE WHEN ${x} IN ('1', 'true') THEN true WHEN ${x} IN
 const syncRuntime = `WITH p AS (SELECT $1::jsonb AS j),
 f AS (SELECT jsonb_typeof(j->'locks') = 'array' AS locks_ok, jsonb_typeof(j->'queues') = 'array' AS queues_ok FROM p),
 lk AS (
-  SELECT DISTINCT ON (component, hex_source, hex_entry) * FROM (
-    SELECT r->>'Component' AS component,
-           COALESCE(NULLIF(r->>'HexSource', ''), encode(convert_to(COALESCE(r->>'Source', ''), 'UTF8'), 'hex')) AS hex_source,
-           COALESCE(NULLIF(r->>'HexEntry', ''), encode(convert_to(COALESCE(r->>'Entry', ''), 'UTF8'), 'hex')) AS hex_entry,
-           r->>'Source' AS source, r->>'Entry' AS entry, r->>'LockName' AS lock_name,
-           ${msTs("r->>'CreationTime'")} AS created_at,
-           ${msTs("r->>'ExpirationTime'")} AS expires_at,
+  SELECT DISTINCT ON (resource_id) * FROM (
+    SELECT r->>'ResourceId' AS resource_id, r->>'ArtifactId' AS artifact_id, r->>'ArtifactName' AS artifact_name,
+           r->>'ArtifactType' AS artifact_type, r->>'PackageId' AS package_id, r->>'PackageName' AS package_name,
+           ${msTs("r->>'CreatedAt'")} AS created_at, r->>'CreatedBy' AS created_by,
            r - '__metadata' AS raw
     FROM p, f, jsonb_array_elements(CASE WHEN f.locks_ok THEN p.j->'locks' ELSE '[]'::jsonb END) AS r
-    WHERE COALESCE(r->>'Component', '') <> '') x),
+    WHERE COALESCE(r->>'ResourceId', '') <> '') x),
 lk_up AS (
-  INSERT INTO cpi_locks (component, hex_source, hex_entry, source, entry, lock_name, created_at, expires_at, raw,
-                         first_seen_at, last_seen_at, released_at)
-  SELECT component, hex_source, hex_entry, source, entry, lock_name, created_at, expires_at, raw, now(), now(), NULL FROM lk
-  ON CONFLICT (component, hex_source, hex_entry) DO UPDATE SET
-    source = EXCLUDED.source, entry = EXCLUDED.entry, lock_name = EXCLUDED.lock_name, created_at = EXCLUDED.created_at,
-    expires_at = EXCLUDED.expires_at, raw = EXCLUDED.raw, last_seen_at = now(), released_at = NULL
+  INSERT INTO cpi_designtime_locks (resource_id, artifact_id, artifact_name, artifact_type, package_id, package_name, created_at,
+                                    created_by, raw, first_seen_at, last_seen_at, released_at)
+  SELECT resource_id, artifact_id, artifact_name, artifact_type, package_id, package_name, created_at, created_by, raw, now(), now(), NULL
+  FROM lk
+  ON CONFLICT (resource_id) DO UPDATE SET
+    artifact_id = EXCLUDED.artifact_id, artifact_name = EXCLUDED.artifact_name, artifact_type = EXCLUDED.artifact_type,
+    package_id = EXCLUDED.package_id, package_name = EXCLUDED.package_name, created_at = EXCLUDED.created_at,
+    created_by = EXCLUDED.created_by, raw = EXCLUDED.raw, last_seen_at = now(), released_at = NULL
   RETURNING 1),
 lk_gone AS (
-  UPDATE cpi_locks l SET released_at = now()
-  FROM f WHERE f.locks_ok AND l.released_at IS NULL
-    AND NOT EXISTS (SELECT 1 FROM lk WHERE lk.component = l.component AND lk.hex_source = l.hex_source AND lk.hex_entry = l.hex_entry)
+  UPDATE cpi_designtime_locks l SET released_at = now()
+  FROM f WHERE f.locks_ok AND l.released_at IS NULL AND NOT EXISTS (SELECT 1 FROM lk WHERE lk.resource_id = l.resource_id)
   RETURNING 1),
 lk_purge AS (
-  DELETE FROM cpi_locks l WHERE l.released_at < now() - interval '30 days'
-    AND NOT EXISTS (SELECT 1 FROM lk WHERE lk.component = l.component AND lk.hex_source = l.hex_source AND lk.hex_entry = l.hex_entry)
+  DELETE FROM cpi_designtime_locks l WHERE l.released_at < now() - interval '30 days'
+    AND NOT EXISTS (SELECT 1 FROM lk WHERE lk.resource_id = l.resource_id)
   RETURNING 1),
 q AS (
   SELECT DISTINCT ON (name) * FROM (
@@ -408,8 +406,9 @@ const readLocks = `WITH p AS (SELECT $1::jsonb AS j)
 SELECT json_build_object(
   'lastSync', ${lastRuntimeSync('locks_ok')},
   'items', (SELECT COALESCE(json_agg(l ORDER BY l.released_at DESC NULLS FIRST, l.created_at NULLS LAST), '[]') FROM (
-      SELECT component, hex_source, hex_entry, source, entry, lock_name, created_at, expires_at, first_seen_at, last_seen_at, released_at
-      FROM cpi_locks, p
+      SELECT resource_id, artifact_id, artifact_name, artifact_type, package_id, package_name, created_at, created_by,
+             first_seen_at, last_seen_at, released_at
+      FROM cpi_designtime_locks, p
       WHERE released_at IS NULL OR released_at > now() - make_interval(days => COALESCE((j->>'releasedDays')::int, 0))) l)
 ) AS result`;
 

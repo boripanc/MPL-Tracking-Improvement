@@ -133,24 +133,25 @@ CREATE TABLE IF NOT EXISTS kanban_oauth (
 );
 
 -- ---------------------------------------------------------------------------------------------
--- CPI runtime: lock entries (Monitor > Manage Locks) and JMS message queues (Monitor > Message
--- Queues). Filled by the n8n workflow "CPI Locks & Queues → Postgres" or by this app's own sync;
+-- CPI design-time artifact locks (Monitor > Manage Design-Time Artifact Locks) and JMS message queues
+-- (Monitor > Message Queues). Filled by the n8n workflow "CPI Locks & Queues → Postgres" or by this app's own sync;
 -- the web pages only read these tables.
 -- ---------------------------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS cpi_locks (
-  component     text NOT NULL,         -- (S)FTP, Aggregator, ...
-  hex_source    text NOT NULL,
-  hex_entry     text NOT NULL,
-  source        text,                  -- e.g. the SFTP user@host or the aggregator name
-  entry         text,                  -- e.g. the locked file path
-  lock_name     text,
-  created_at    timestamptz,
-  expires_at    timestamptz,
+-- Design-time artifact locks (Monitor > Manage Design-Time Artifact Locks): an iFlow or other artifact that
+-- someone opened for editing.
+CREATE TABLE IF NOT EXISTS cpi_designtime_locks (
+  resource_id   text PRIMARY KEY,
+  artifact_id   text,
+  artifact_name text,
+  artifact_type text,                  -- IFlow, ValueMapping, ScriptCollection, ...
+  package_id    text,
+  package_name  text,
+  created_at    timestamptz,           -- when the artifact was locked
+  created_by    text,                  -- who locked it
   raw           jsonb,
   first_seen_at timestamptz NOT NULL DEFAULT now(),
   last_seen_at  timestamptz NOT NULL DEFAULT now(),
-  released_at   timestamptz,           -- set when the lock is no longer in CPI
-  PRIMARY KEY (component, hex_source, hex_entry)
+  released_at   timestamptz            -- set when the lock is no longer in CPI
 );
 
 CREATE TABLE IF NOT EXISTS cpi_jms_queues (
@@ -195,7 +196,7 @@ CREATE TABLE IF NOT EXISTS cpi_runtime_sync (
   id             serial PRIMARY KEY,
   synced_at      timestamptz NOT NULL DEFAULT now(),
   source         text,                 -- n8n or app
-  locks_ok       boolean NOT NULL,     -- false when CPI did not return the locks this time
+  locks_ok       boolean NOT NULL,     -- false when CPI did not return the design-time locks this time
   queues_ok      boolean NOT NULL,
   locks          integer NOT NULL,
   locks_released integer NOT NULL,
