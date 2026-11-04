@@ -8,6 +8,7 @@ const { createApp } = require('./app');
 const { startPoller } = require('./poller/cpi');
 const { startCertificateSync } = require('./cpi/certificates');
 const { startRuntimeSync } = require('./cpi/runtime');
+const { startPgpSync } = require('./cpi/pgp');
 
 const config = loadConfig(process.env);
 const problems = validateConfig(config);
@@ -20,6 +21,7 @@ if (config.auth.disabled) console.warn('[auth] AUTH_DISABLED=true: anyone who ca
 console.log(envFiles.length ? `Settings read from ${envFiles.join(', ')} and the environment` : 'No .env file found; using environment variables only');
 if (cpiConfigured(config)) {
   console.log(`[certificates] read from the database; this server also syncs the keystore from ${new URL(config.poller.apiUrl).host} every ${config.certificates.syncIntervalMinutes} min`);
+  console.log(`[pgp] read from the database; this server also syncs the PGP keys from CPI every ${config.certificates.syncIntervalMinutes} min`);
   console.log(`[locks/queues] read from the database; this server also syncs them from CPI every ${config.runtime.syncIntervalMinutes} min`);
 } else {
   console.log(`[certificates] read from the database (filled by n8n); no CPI connection here (${missingCpiVars(config).join(', ')} not set), so no sync from this server`);
@@ -38,6 +40,9 @@ const certSync = app.locals.certificates.canSync
 const runtimeSync = app.locals.runtime.canSync
   ? startRuntimeSync({ store: app.locals.runtime, intervalMinutes: config.runtime.syncIntervalMinutes })
   : null;
+const pgpSync = app.locals.pgp.canSync
+  ? startPgpSync({ store: app.locals.pgp, intervalMinutes: config.certificates.syncIntervalMinutes })
+  : null;
 
 let stopping = false;
 async function shutdown(signal) {
@@ -47,6 +52,7 @@ async function shutdown(signal) {
   if (poller) poller.stop();
   if (certSync) certSync.stop();
   if (runtimeSync) runtimeSync.stop();
+  if (pgpSync) pgpSync.stop();
   server.close(() => pool.end().finally(() => process.exit(0)));
   setTimeout(() => process.exit(1), 10000).unref();
 }

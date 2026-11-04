@@ -100,7 +100,7 @@ async function kanbanCall(fn) {
 
 /* ---------- router ---------- */
 
-function apiRouter({ pool, config, certificates, runtime, tickets, kanban }) {
+function apiRouter({ pool, config, certificates, runtime, pgp, tickets, kanban }) {
   const router = express.Router();
   const run = (sql, params) => queryResult(pool, sql, params);
   const handle = (fn) => (req, res, next) => {
@@ -324,6 +324,22 @@ function apiRouter({ pool, config, certificates, runtime, tickets, kanban }) {
     } catch (err) {
       console.error('[certificates] sync failed:', err.message);
       throw new HttpError(502, `Could not read the keystore from CPI: ${err.message}`);
+    }
+  }));
+
+  // PGP keys (public and secret keyrings), read from the database (filled by the n8n workflow or the app's own sync).
+  router.get('/pgp-keys', handle((req) => pgp.read({ includeRemoved: req.query.removed === '1' })));
+
+  // Copy the PGP keys from CPI into the database now (only when this server has a CPI connection).
+  router.post('/pgp-keys/sync', handle(async () => {
+    if (!pgp.canSync) {
+      throw new HttpError(409, 'This server has no CPI connection, so it cannot sync. The n8n workflow "CPI PGP Keys → Postgres" keeps the data up to date.');
+    }
+    try {
+      return await pgp.sync({ source: 'app' });
+    } catch (err) {
+      console.error('[pgp] sync failed:', err.message);
+      throw new HttpError(502, `Could not read the PGP keys from CPI: ${err.message}`);
     }
   }));
 
