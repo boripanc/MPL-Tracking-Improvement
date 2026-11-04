@@ -207,7 +207,7 @@ function requireLogin({ users = [], disabled = false, sessionSecret = '', idleMi
     }
     let who;
     try {
-      who = await sso.finish({ code: String(q.code || ''), flow });
+      who = await sso.finish({ code: String(q.code || ''), flow, iss: q.iss === undefined ? undefined : String(q.iss) });
     } catch (err) {
       console.error('[auth] SSO sign-in failed:', err.message);
       return page(502, { next: nextUrl, message: `The SSO sign-in failed: ${err.message}`, bad: true });

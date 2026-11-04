@@ -136,8 +136,11 @@ function createSso(cfg, { env = process.env } = {}) {
   }
 
   /** Finishes a sign-in: swaps the code for tokens and returns { user, name, claims }. */
-  async function finish({ code, flow }) {
+  async function finish({ code, flow, iss }) {
     const d = await meta();
+    // RFC 9207: a provider that names itself in the answer must name the expected issuer (mix-up protection).
+    if (iss !== undefined && iss !== d.issuer) throw new SsoError(`The sign-in answer comes from ${iss}, not from ${d.issuer}.`);
+    if (iss === undefined && d.authorization_response_iss_parameter_supported) throw new SsoError('The sign-in answer does not say which server sent it.');
     const form = new URLSearchParams({
       grant_type: 'authorization_code',
       code,
@@ -152,9 +155,17 @@ function createSso(cfg, { env = process.env } = {}) {
       else headers.Authorization = 'Basic ' + Buffer.from(`${encodeURIComponent(cfg.clientId)}:${encodeURIComponent(cfg.clientSecret)}`).toString('base64');
     }
     const tokens = await getJson(d.token_endpoint, { method: 'POST', headers, body: form.toString() });
-    const claims = await verifyIdToken(tokens.id_token, flow.nonce);
-    const user = String(claims[cfg.userClaim] || claims.email || claims.preferred_username || claims.upn || '').trim().toLowerCase();
-    if (!user) throw new SsoError(`The ID token has no ${cfg.userClaim || 'email'} claim, so the user is unknown. Add the "email" scope or set SSO_USER_CLAIM.`);
+    let claims = await verifyIdToken(tokens.id_token, flow.nonce);
+    const pick = (c) => String(c[cfg.userClaim] || c.email || c.preferred_username || c.upn || '').trim().toLowerCase();
+    // Some providers (node-oidc-provider, Keycloak) put email and name only in the userinfo answer, not in the
+    // ID token of the code flow. Ask userinfo then, and accept it only for the same subject.
+    if (!pick(claims) && d.userinfo_endpoint && tokens.access_token) {
+      const info = await getJson(d.userinfo_endpoint, { headers: { Authorization: `Bearer ${tokens.access_token}`, Accept: 'application/json' } });
+      if (info.sub !== claims.sub) throw new SsoError('The sign-in server answered for another user (userinfo subject mismatch).');
+      claims = { ...info, ...claims, email: info.email, name: claims.name || info.name };
+    }
+    const user = pick(claims);
+    if (!user) throw new SsoError(`The ID token and userinfo have no ${cfg.userClaim || 'email'} claim, so the user is unknown. Add the "email" scope or set SSO_USER_CLAIM.`);
     return { user, name: claims.name || user, claims };
   }
 

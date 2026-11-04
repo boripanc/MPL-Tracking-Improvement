@@ -75,6 +75,25 @@ their company account and come back to the page they asked for. Any OpenID Conne
 ID (Office 365), Google Workspace, Okta, Keycloak, SAP Cloud Identity Services. The app checks the ID token's
 signature, issuer, audience, expiry and nonce, and uses PKCE. The user name in the app is the person's email.
 
+**Own SSO at sso.teddybiere.info** (OpenID Connect, code flow with PKCE)
+
+1. In the SSO server, add a client for this app: grant type `authorization_code`, response type `code`,
+   token auth method `client_secret_basic` (or `client_secret_post`), redirect URI
+   `https://<this app's address>/login/sso/callback`.
+2. Set:
+
+```bash
+SSO_ISSUER=https://sso.teddybiere.info
+SSO_CLIENT_ID=<client id>
+SSO_CLIENT_SECRET=<client secret>
+SSO_LABEL=Sign in with Teddybiere SSO
+SSO_ALLOWED_USERS=<emails allowed in>      # or SSO_ALLOWED_DOMAINS=<email domain>
+SESSION_SECRET=<openssl rand -hex 32>
+```
+
+The ID token of this server does not carry the email in the code flow, so the app reads it from `/me` (userinfo)
+and checks it belongs to the same user. The server sends `iss` with the answer; the app checks it too.
+
 **Microsoft Entra ID**
 
 1. Azure portal → **Microsoft Entra ID → App registrations → New registration**. Name: *CPI Error Center*;

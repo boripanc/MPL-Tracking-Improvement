@@ -13,7 +13,7 @@ function fakeIdp() {
   const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
   const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'k1', use: 'sig', alg: 'RS256' };
   const codes = new Map();
-  const idp = { next: { email: 'Alice@ThaiUnion.com', name: 'Alice A' }, tamper: null, base: '' };
+  const idp = { next: { email: 'Alice@ThaiUnion.com', name: 'Alice A' }, tamper: null, base: '', tokens: new Map() };
   const sign = (claims, header = { alg: 'RS256', kid: 'k1', typ: 'JWT' }) => {
     const h = Buffer.from(JSON.stringify(header)).toString('base64url');
     const p = Buffer.from(JSON.stringify(claims)).toString('base64url');
@@ -28,9 +28,14 @@ function fakeIdp() {
       return send(res, 200, {
         issuer: `${idp.base}/tenant/v2.0`, authorization_endpoint: `${idp.base}/authorize`, token_endpoint: `${idp.base}/token`,
         jwks_uri: `${idp.base}/keys`, token_endpoint_auth_methods_supported: ['client_secret_post', 'client_secret_basic'],
+        userinfo_endpoint: `${idp.base}/me`, authorization_response_iss_parameter_supported: true,
       });
     }
     if (url.pathname === '/keys') return send(res, 200, { keys: [jwk] });
+    if (url.pathname === '/me') {
+      const who = idp.tokens.get((req.headers.authorization || '').replace(/^Bearer /, ''));
+      return who ? send(res, 200, { sub: idp.userinfoSub || who.sub, email: who.email, name: who.name }) : send(res, 401, { error: 'invalid_token' });
+    }
     if (url.pathname === '/authorize') {
       const q = url.searchParams;
       idp.lastAuthorize = q;
@@ -39,6 +44,7 @@ function fakeIdp() {
       const back = new URL(q.get('redirect_uri'));
       back.searchParams.set('code', code);
       back.searchParams.set('state', q.get('state'));
+      if (!idp.noIss) back.searchParams.set('iss', idp.wrongIss || `${idp.base}/tenant/v2.0`);
       res.writeHead(302, { Location: back.toString() }).end();
       return undefined;
     }
@@ -52,11 +58,15 @@ function fakeIdp() {
         return send(res, 400, { error: 'invalid_grant', error_description: 'AADSTS70008: bad code' });
       }
       const now = Math.floor(Date.now() / 1000);
-      let claims = { iss: `${idp.base}/tenant/v2.0`, aud: 'app-id', iat: now, exp: now + 3600, nonce: c.q.get('nonce'), ...c.who };
+      const at = crypto.randomBytes(8).toString('hex');
+      const sub = `sub-${c.who.email}`;
+      idp.tokens.set(at, { sub, ...c.who });
+      // Like node-oidc-provider (sso.teddybiere.info): in the code flow, email and name come only from userinfo.
+      let claims = { iss: `${idp.base}/tenant/v2.0`, aud: 'app-id', sub, iat: now, exp: now + 3600, nonce: c.q.get('nonce'), ...(idp.userinfoOnly ? {} : c.who) };
       if (idp.tamper) claims = idp.tamper(claims);
       let token = sign(claims);
       if (idp.badSignature) token = token.slice(0, -4) + 'AAAA';
-      return send(res, 200, { access_token: 'at', token_type: 'Bearer', id_token: token });
+      return send(res, 200, { access_token: at, token_type: 'Bearer', id_token: token });
     }
     return send(res, 404, { error: 'not found' });
   });
@@ -184,6 +194,32 @@ test('SSO: other domains, forged state, bad signature, wrong audience and expire
   const cancelled = await c.go('/login/sso/callback?error=access_denied&error_description=AADSTS65004%3A+User+declined');
   assert.equal(cancelled.status, 401);
   assert.match(cancelled.text, /not completed: AADSTS65004: User declined/);
+});
+
+test('SSO: email from userinfo when the ID token has none (node-oidc-provider), and the iss check', async () => {
+  idp.userinfoOnly = true;
+  try {
+    const b = browser(app.base);
+    assert.equal((await b.signIn()).status, 303);
+    assert.equal(JSON.parse((await b.go('/api/meta')).text).user, 'alice@thaiunion.com');
+    idp.userinfoSub = 'someone-else';
+    const mixed = await browser(app.base).signIn();
+    assert.equal(mixed.status, 502);
+    assert.match(mixed.text, /another user/);
+  } finally {
+    idp.userinfoOnly = false;
+    idp.userinfoSub = null;
+  }
+  for (const [what, set] of [['wrong iss', () => { idp.wrongIss = 'https://evil.example'; }], ['missing iss', () => { idp.noIss = true; }]]) {
+    set();
+    try {
+      const r = await browser(app.base).signIn();
+      assert.equal(r.status, 502, what);
+    } finally {
+      idp.wrongIss = null;
+      idp.noIss = false;
+    }
+  }
 });
 
 test('SSO_ONLY hides the password form and refuses passwords; SSO sessions end when the domain is removed', async () => {
