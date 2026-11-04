@@ -10,6 +10,11 @@ function int(value, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/** Comma-separated values, trimmed and lowercased, empty ones dropped. */
+function list(value) {
+  return String(value || '').split(',').map((v) => v.trim().toLowerCase()).filter(Boolean);
+}
+
 function parseUsers(value) {
   return String(value || '')
     .split(',')
@@ -101,6 +106,22 @@ function loadConfig(env = process.env) {
       sessionSecret: (env.SESSION_SECRET || '').trim(),
       idleMinutes: Math.max(1, int(env.SESSION_IDLE_MINUTES, 60)),
       maxHours: Math.max(1, int(env.SESSION_MAX_HOURS, 12)),
+      // Single sign-on (OpenID Connect). On when SSO_ISSUER and SSO_CLIENT_ID are set.
+      sso: {
+        issuer: (env.SSO_ISSUER || '').trim(),
+        clientId: (env.SSO_CLIENT_ID || '').trim(),
+        clientSecret: (env.SSO_CLIENT_SECRET || '').trim(),
+        redirectUrl: (env.SSO_REDIRECT_URL || '').trim(),
+        scopes: (env.SSO_SCOPES || 'openid profile email').trim(),
+        userClaim: (env.SSO_USER_CLAIM || '').trim(),
+        allowedDomains: list(env.SSO_ALLOWED_DOMAINS).map((d) => d.replace(/^@/, '')),
+        allowedUsers: list(env.SSO_ALLOWED_USERS),
+        label: (env.SSO_LABEL || 'Sign in with SSO').trim(),
+        only: bool(env.SSO_ONLY, false),
+        prompt: (env.SSO_PROMPT || '').trim(),
+        domainHint: (env.SSO_DOMAIN_HINT || '').trim(),
+        timeoutMs: 15000,
+      },
     },
     db: {
       url: env.DATABASE_URL || '',
@@ -186,8 +207,18 @@ function validateConfig(config) {
     problems.push(`AUTH_DISABLED=true only works with HOST=127.0.0.1 (this computer only); this server listens on ${config.host}. `
       + 'Remove AUTH_DISABLED and set APP_USERS=user:password so everyone has to sign in.');
   }
-  if (!config.auth.disabled && config.auth.users.length === 0) {
-    problems.push('APP_USERS is empty. Set APP_USERS=user:password (or AUTH_DISABLED=true for local development only).');
+  const sso = config.auth.sso;
+  const ssoOn = Boolean(sso.issuer && sso.clientId);
+  if (Boolean(sso.issuer) !== Boolean(sso.clientId)) problems.push('SSO needs both SSO_ISSUER and SSO_CLIENT_ID.');
+  if (sso.issuer && !/^https:[/][/]/i.test(sso.issuer) && !/^http:[/][/](localhost|127[.]0[.]0[.]1)([:/]|$)/i.test(sso.issuer)) {
+    problems.push('SSO_ISSUER must start with https://, e.g. https://login.microsoftonline.com/<tenant id>/v2.0');
+  }
+  if (sso.redirectUrl && !/^https?:[/][/][^/]+[/]login[/]sso[/]callback$/i.test(sso.redirectUrl)) {
+    problems.push("SSO_REDIRECT_URL must be this app's address ending in /login/sso/callback.");
+  }
+  if (sso.only && !ssoOn) problems.push('SSO_ONLY=true needs SSO_ISSUER and SSO_CLIENT_ID.');
+  if (!config.auth.disabled && config.auth.users.length === 0 && !ssoOn) {
+    problems.push('APP_USERS is empty. Set APP_USERS=user:password or set up SSO (SSO_ISSUER, SSO_CLIENT_ID) (or AUTH_DISABLED=true for local development only).');
   }
   if (!/^[A-Za-z_][A-Za-z0-9_]*([.][A-Za-z_][A-Za-z0-9_]*)?$/.test(config.tickets.table)) {
     problems.push('TICKETS_TABLE must be a table name such as tickets or public.tickets.');
