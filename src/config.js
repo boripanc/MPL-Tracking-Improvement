@@ -116,6 +116,13 @@ function loadConfig(env = process.env) {
       // The page warns when the last sync (by n8n or the app) is older than this.
       staleHours: Math.max(1, int(env.CERT_STALE_HOURS, 26)),
     },
+    runtime: {
+      // Locks and Message queues menus. Only used when this server has a CPI connection: how often the app copies
+      // locks and queues into the database (the n8n workflow does this otherwise).
+      syncIntervalMinutes: Math.max(5, int(env.RUNTIME_SYNC_INTERVAL_MINUTES, 15)),
+      // The pages warn when the last sync (by n8n or the app) is older than this.
+      staleMinutes: Math.max(5, int(env.RUNTIME_STALE_MINUTES, 60)),
+    },
     tickets: {
       // Freshservice tickets table filled by the n8n workflow "FreshServices Tickets" (Ticket pulse menu).
       table: env.TICKETS_TABLE || 'tickets',

@@ -19,6 +19,8 @@ existing `errorscenario` view, so the app and the view always agree.
 | **Ticket pulse** | Health of the Freshservice ticket queue (from the table the n8n workflow fills): open backlog, overdue, due soon, unassigned, created vs. resolved per day, backlog by age, group, responder and status, and a filterable list of open tickets with their last comment. The menu shows a red badge with the number of overdue tickets. |
 | **Kanban card** (in the error details) | Turns an error into a card on the TodoList Kanban board (through the board's MCP server). The form is filled with the iFlow, message and correlation IDs, category, known root cause, CPI link and error text; pick the column, priority, labels, assignee and due date, then create. The error details list the cards that already mention the message ID, so the same error is not filed twice. Shown only when `KANBAN_MCP_URL` is set; the first time, someone clicks **Connect Kanban board** and signs in to the Kanban app. |
 | **Certificates** | Certificates and key pairs in the CPI tenant keystore (stored in the database by the n8n workflow) with their expiry date and days left: **Expired**, **Expires soon** (< 30 days), **Expiring** (< 90 days) or **Valid**. Filter by status or type, hide SAP-owned entries, search, open the full details (subject, issuer, serial, fingerprint) and export CSV. The menu shows a red badge with the number of expired and soon-expiring entries. |
+| **Locks** | Lock entries in CPI (Monitor → Manage Locks → Lock Entries), e.g. files an SFTP sender is reading or aggregations in progress: component, source, entry, locked since, age and expiry. Locks still held after their expiry time are flagged **Past expiry** (probably stuck) and counted in the menu badge. Filter, search, show locks released in the last 7 days, export CSV. Read-only: release locks in CPI. |
+| **Message queues** | JMS queues in CPI (Monitor → Manage Stores → Message Queues) with messages waiting, failed messages, oldest message, size, fill level, status (**Full**, **Nearly full**, **Failed messages**, **Inactive**, **Messages waiting**, **OK**) and the iFlows that use each queue, plus the tenant's JMS storage and queue limits. Open a queue to see its messages (retries, next retry, sender/receiver, link to the error when the message log is in the database). The menu badge counts failed messages and full queues. Read-only: retry or delete messages in CPI. |
 
 Both editors have a **Test against last 30 days** button that shows how many errors a pattern would match before you save it.
 
@@ -153,6 +155,36 @@ causes on company servers:
 | *OAuth token request failed: HTTP 401* | Wrong `CPI_CLIENT_ID` / `CPI_CLIENT_SECRET`, or they come from a different service key than `CPI_TOKEN_URL`. |
 | *Read keystore … HTTP 403* | The service key may not read the keystore; add the role to the service instance. |
 | *Got text/html instead of JSON* | `CPI_API_URL` points to the web UI instead of the tenant API (`…it-cpiNNN…/api/v1`). |
+
+## Locks and message queues
+
+The **Locks** and **Message queues** menus read from the database too, so the web server does **not** need access
+to CPI. The tables (created automatically, also in `db/schema.sql`):
+
+- `cpi_locks`: lock entries (`GET /api/v1/Locks`): component, source, entry, created / expires, first and last seen,
+  and `released_at` when the lock is gone from CPI. Released locks are deleted after 30 days.
+- `cpi_jms_queues`: JMS queues (`GET /api/v1/Queues`) with message count, size, state, fill level, active flag and
+  the iFlows that use the queue (`Queues('<name>')/Artifacts`). Queues that disappear are marked as removed.
+- `cpi_jms_messages`: the messages of queues that are not empty (`Queues('<name>')/Messages`, up to 1000 per queue).
+  Messages of a queue that became empty are deleted.
+- `cpi_runtime_sync`: one row per sync, with the JMS broker figures (`JmsBrokers('Broker1')`: storage used and
+  queue limits).
+
+**Who fills the tables**
+
+1. **n8n workflow "CPI Locks & Queues → Postgres"** (recommended). It runs every 15 minutes with the same OAuth
+   credential as the keystore workflow and stores the result with the same SQL as the app (`syncRuntime` and
+   `syncQueueMessages` in `src/sql.js`). If CPI does not answer for locks or for queues, that part is left as it was.
+2. **The app itself**, only when this server has the CPI connection set (same variables as for certificates). It then
+   syncs every `RUNTIME_SYNC_INTERVAL_MINUTES` and shows a **Sync from CPI now** button.
+
+The service key needs to read monitoring data (role `MonitoringDataRead`). The pages warn when the last sync is older
+than `RUNTIME_STALE_MINUTES`.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `RUNTIME_STALE_MINUTES` | `60` | Warn on the Locks and Message queues pages when the last sync is older than this. |
+| `RUNTIME_SYNC_INTERVAL_MINUTES` | `15` | Only with a CPI connection on this server: how often the app syncs locks and queues. |
 
 ## Ticket pulse
 
@@ -327,6 +359,10 @@ All endpoints are under `/api`, require login and return JSON. Errors return `{ 
 | `POST /api/test-match` | `{ kind: "like" \| "regex", pattern, flow }` → matches in the last 30 days |
 | `GET /api/certificates` | Keystore entries from the database with `state` (expired / critical / warning / ok / unknown), `daysLeft`, a summary and the last sync. `?removed=1` includes removed entries |
 | `POST /api/certificates/sync` | Copy the keystore from CPI into the database now (only when this server has a CPI connection; otherwise 409) |
+| `GET /api/locks` | Lock entries from the database with `state` (active / expired / released), age, a summary by component and the last sync. `?released=7` adds locks released in the last 7 days |
+| `GET /api/queues` | JMS queues from the database with `state`, messages, failed messages, oldest message, iFlows, the broker figures and the last sync. `?removed=1` includes removed queues |
+| `GET /api/queues/:name` | One queue with its stored messages |
+| `POST /api/runtime/sync` | Copy locks and queues from CPI into the database now (only when this server has a CPI connection; otherwise 409) |
 | `GET /api/tickets/pulse` | Ticket pulse: KPIs, created vs. resolved, backlog breakdowns and the open tickets (`from`, `to`, `tz`, or `view=week` / `month` / `year` for the last 12 weeks, 12 months or 5 years; `month=YYYY-MM` for one month, per day) |
 | `GET /api/tickets/:id` | One ticket with description, tags and last comment |
 | `GET /api/cpi/check` | Step-by-step CPI connection test (no secrets in the result) |
@@ -355,6 +391,7 @@ src/
   middleware/        Basic auth, error handling
   cpi/client.js      CPI OData API client (OAuth2 client credentials)
   cpi/certificates.js keystore store/read in the database + expiry classification (Certificates menu)
+  cpi/runtime.js     locks and JMS queues: read from CPI, store/read in the database (Locks, Message queues menus)
   kanban.js          MCP client for the TodoList Kanban board (OAuth sign-in, create a card from an error)
   tickets.js         Ticket pulse queries on the Freshservice tickets table (filled by n8n)
   poller/cpi.js      optional CPI MPL poller

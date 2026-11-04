@@ -49,13 +49,13 @@ function fail(e) { toast((e && e.message) || String(e), true); }
 function show(tab) {
   S.tab = tab;
   $$('#tabs button').forEach(function (b) { b.classList.toggle('on', b.dataset.t === tab); });
-  ['dash', 'errors', 'known', 'cats', 'tickets', 'certs'].forEach(function (t) { $('#v-' + t).hidden = t !== tab; });
+  ['dash', 'errors', 'known', 'cats', 'tickets', 'certs', 'locks', 'queues'].forEach(function (t) { $('#v-' + t).hidden = t !== tab; });
   syncRangeVisibility();
   window.scrollTo(0, 0);
   return load();
 }
 function load() {
-  var loaders = { dash: loadDash, errors: loadErrors, known: loadKnown, cats: loadCats, tickets: loadTickets, certs: loadCerts };
+  var loaders = { dash: loadDash, errors: loadErrors, known: loadKnown, cats: loadCats, tickets: loadTickets, certs: loadCerts, locks: loadLocks, queues: loadQueues };
   if (!loaders[S.tab]) return show('dash'); // unknown menu: fall back to the dashboard instead of failing
   return loaders[S.tab]().catch(fail);
 }
@@ -70,12 +70,17 @@ function loadMeta() {
       // Fill the menu badge in the background (from the database); problems are shown on the Certificates screen.
       get('api/certificates').then(function (d) { if (d.enabled) { S.cache.certs = d; setCertBadge(d.summary); } }).catch(function () {});
     }
+    // Lock and queue badges, from the database.
+    if (S.tab !== 'locks') get('api/locks').then(function (d) { setRuntimeBadges('locks', d); }).catch(function () {});
+    if (S.tab !== 'queues') get('api/queues').then(function (d) { setRuntimeBadges('queues', d); }).catch(function () {});
     if (S.tab !== 'tickets') get('api/tickets/pulse', rangeParams()).then(setTicketBadge).catch(function () {});
   });
 }
 function refreshAll() {
   S.cache.known = null;
   if (S.tab === 'certs') return loadCerts().catch(fail);
+  if (S.tab === 'locks') return loadLocks().catch(fail);
+  if (S.tab === 'queues') return loadQueues().catch(fail);
   return loadMeta().then(load).catch(fail);
 }
 
@@ -702,6 +707,245 @@ function exportCertCsv() {
   toast('Exported ' + rows.length + ' certificates');
 }
 
+/* ---------- Locks and Message queues (CPI runtime, from the database) ---------- */
+var LOCK_STATES = { active: 'Locked', expired: 'Past expiry', released: 'Released' };
+var Q_STATES = { full: 'Full', critical: 'Nearly full', failed: 'Failed messages', inactive: 'Inactive', waiting: 'Messages waiting', ok: 'OK', removed: 'Removed' };
+var Q_PILL = { full: 'cert-expired', critical: 'cert-critical', failed: 'cert-critical', inactive: 'cert-warning', waiting: 'tk', ok: 'cert-ok', removed: '' };
+S.lf = { state: '', component: '', q: '', released: false };
+S.qf = { state: '', q: '', busy: false, removed: false };
+
+function ago(min) {
+  if (min == null) return '–';
+  if (min < 60) return min + ' min';
+  if (min < 1440) return Math.floor(min / 60) + ' h ' + (min % 60) + ' min';
+  return Math.floor(min / 1440) + ' d ' + Math.floor((min % 1440) / 60) + ' h';
+}
+function minutesSince(s) { return s ? Math.max(0, Math.floor((Date.now() - Date.parse(s)) / 60000)) : null; }
+function bytes(n) {
+  if (n == null) return '–';
+  var u = ['B', 'KB', 'MB', 'GB', 'TB'], i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i ? n.toFixed(n < 10 ? 1 : 0) : n) + ' ' + u[i];
+}
+function setBadge(id, n, title) { var b = $(id); b.textContent = n > 99 ? '99+' : String(n); b.hidden = !n; if (title) b.title = title; }
+function setRuntimeBadges(kind, d) {
+  if (!d || !d.enabled) return;
+  if (kind === 'locks') setBadge('#lock-badge', d.summary.expired);
+  else setBadge('#queue-badge', d.summary.failed + d.summary.full + d.summary.critical);
+}
+function staleBox(d, what) {
+  var ls = d.lastSync, wf = 'the n8n workflow "CPI Locks & Queues → Postgres"';
+  if (!ls) return '<div class="card" style="margin-bottom:12px"><b class="bad">No ' + what + ' data yet.</b> <span class="muted">Run ' + wf + ' once' + (d.canSync ? ' or press "Sync from CPI now"' : '') + '.</span></div>';
+  if (d.stale) return '<div class="card" style="margin-bottom:12px"><b class="bad">This data may be out of date:</b> <span class="muted">the last sync was ' + esc(dt(ls.at)) + ', more than ' + d.staleMinutes + ' minutes ago. Check that ' + wf + ' is active and succeeds.</span></div>';
+  return '';
+}
+function syncedText(d) { return d.lastSync ? 'Last synced from CPI ' + dt(d.lastSync.at) + ' (' + (d.lastSync.source || 'unknown') + ')' : 'Never synced'; }
+function syncRuntime(btn, reload) {
+  btn.disabled = true;
+  btn.textContent = 'Syncing…';
+  request('POST', 'api/runtime/sync').then(function (r) {
+    toast('Synced ' + r.locks + ' locks and ' + r.queues + ' queues from CPI' + (r.errors.length ? ' (' + r.errors.length + ' problems: ' + r.errors[0] + ')' : ''), r.errors.length > 0);
+    return reload();
+  }).catch(fail).then(function () { btn.disabled = false; btn.textContent = 'Sync from CPI now'; });
+}
+function kpiPick(sel, key, state, render) {
+  $$(sel + ' [data-st]').forEach(function (el) {
+    var pick = function () { S[key].state = S[key].state === el.dataset.st ? '' : el.dataset.st; render(); };
+    el.onclick = pick;
+    el.onkeydown = function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } };
+  });
+}
+function pickKpi(key, state, label, value, sub, cls) {
+  return '<div class="card kpi click ' + (cls || '') + (S[key].state === state ? ' sel' : '') + '" data-st="' + state + '" role="button" tabindex="0">' +
+    '<div class="l">' + esc(label) + '</div><div class="v">' + value + '</div><div class="s">' + esc(sub) + '</div></div>';
+}
+function downloadCsv(name, cols, rows) {
+  var q = function (v) { v = v == null ? '' : Array.isArray(v) ? v.join('; ') : String(v); return '"' + v.split('"').join('""') + '"'; };
+  var csv = cols.join(',') + NL + rows.map(function (r) { return cols.map(function (c) { return q(r[c]); }).join(','); }).join(NL);
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download = name;
+  a.click();
+  toast('Exported ' + rows.length + ' rows');
+}
+
+/* Locks */
+function lockPill(l) { return '<span class="pill ' + ({ active: 'tk', expired: 'cert-critical', released: '' })[l.state] + '">' + esc(LOCK_STATES[l.state]) + '</span>'; }
+function loadLocks() {
+  var v = $('#v-locks');
+  if (!$('#lk-tab', v)) {
+    v.innerHTML = '<div class="grid kpis" id="lk-kpis"></div>' +
+      '<div class="filters mt"><select id="lf-state" aria-label="Status"></select><select id="lf-comp" aria-label="Component"></select>' +
+      '<input id="lf-q" type="search" placeholder="Search source or entry (file, aggregator, …)" style="min-width:240px;flex:1">' +
+      '<label class="check"><input type="checkbox" id="lf-rel"> Show released (last 7 days)</label>' +
+      '<button class="btn" id="lf-csv">Export CSV</button><button class="btn" id="lf-sync" hidden>Sync from CPI now</button></div>' +
+      '<div id="lk-stale"></div>' +
+      '<div class="card"><div class="row" style="margin-bottom:8px"><b id="lk-count"></b><span class="sp"></span><span class="muted small" id="lk-synced"></span></div><div class="scroll" id="lk-tab"></div></div>' +
+      '<p class="muted small">Lock entries from CPI (Monitor → Integrations and APIs → Manage Locks → Lock Entries), for example a file an SFTP sender is reading or an aggregation in progress. ' +
+      '"Past expiry" = still locked after its expiry time, which usually means a stuck lock. This page only shows locks; release them in CPI. The data comes from the database, which the n8n workflow "CPI Locks &amp; Queues → Postgres" fills.</p>';
+    $('#lf-state').onchange = function () { S.lf.state = this.value; renderLocks(); };
+    $('#lf-comp').onchange = function () { S.lf.component = this.value; renderLocks(); };
+    $('#lf-q').oninput = function () { S.lf.q = this.value.trim().toLowerCase(); renderLocks(); };
+    $('#lf-rel').onchange = function () { S.lf.released = this.checked; loadLocks().catch(fail); };
+    $('#lf-csv').onclick = function () { downloadCsv('cpi-locks.csv', ['state', 'component', 'source', 'entry', 'lockName', 'createdAt', 'expiresAt', 'ageMinutes', 'releasedAt'], S.cache.lockRows || []); };
+    $('#lf-sync').onclick = function () { syncRuntime(this, loadLocks); };
+  }
+  $('#lk-tab').innerHTML = '<div class="empty">Loading…</div>';
+  return get('api/locks', S.lf.released ? { released: 7 } : {}).then(function (d) {
+    if (!d.enabled) { v.innerHTML = '<div class="card"><h2>Locks are not available yet</h2><p class="muted">' + esc(d.reason) + '</p></div>'; return; }
+    S.cache.locks = d;
+    setRuntimeBadges('locks', d);
+    renderLocks();
+  }, function (e) { $('#lk-tab').innerHTML = '<div class="empty bad">' + esc(e.message) + '</div>'; });
+}
+function renderLocks() {
+  var d = S.cache.locks, f = S.lf, sum = d.summary;
+  var current = d.items.filter(function (l) { return l.state !== 'released'; });
+  var oldest = current.reduce(function (m, l) { return l.ageMinutes != null && l.ageMinutes > m ? l.ageMinutes : m; }, -1);
+  var comps = Object.keys(sum.components).sort();
+  $('#lk-kpis').innerHTML =
+    pickKpi('lf', 'current', 'Locked now', fmt(sum.active + sum.expired), comps.map(function (c) { return c + ' ' + sum.components[c]; }).join(' · ') || 'nothing locked', '') +
+    pickKpi('lf', 'expired', 'Past expiry', fmt(sum.expired), 'probably stuck, check in CPI', sum.expired ? 'alert' : 'good') +
+    '<div class="card kpi"><div class="l">Oldest lock</div><div class="v">' + esc(oldest < 0 ? '–' : ago(oldest)) + '</div><div class="s">time since it was locked</div></div>' +
+    (f.released ? pickKpi('lf', 'released', 'Released', fmt(sum.released), 'in the last 7 days', '') : '');
+  kpiPick('#lk-kpis', 'lf', f.state, renderLocks);
+  $('#lf-state').innerHTML = opts([['', 'All statuses'], ['current', 'Locked now'], ['active', 'Locked (within expiry)'], ['expired', 'Past expiry'], ['released', 'Released']], f.state);
+  var allComps = [];
+  d.items.forEach(function (l) { if (allComps.indexOf(l.component) < 0) allComps.push(l.component); });
+  $('#lf-comp').innerHTML = opts([['', 'All components']].concat(allComps.sort().map(function (c) { return [c, c]; })), f.component);
+  $('#lf-rel').checked = f.released;
+  $('#lf-sync').hidden = !d.canSync;
+  $('#lk-synced').textContent = syncedText(d);
+  $('#lk-stale').innerHTML = staleBox(d, 'lock');
+  var rows = d.items.filter(function (l) {
+    if (f.state === 'current' && l.state === 'released') return false;
+    if (f.state && f.state !== 'current' && l.state !== f.state) return false;
+    if (f.component && l.component !== f.component) return false;
+    if (f.q && [l.source, l.entry, l.lockName].join(' ').toLowerCase().indexOf(f.q) < 0) return false;
+    return true;
+  });
+  S.cache.lockRows = rows;
+  $('#lk-count').textContent = fmt(rows.length) + ' of ' + fmt(d.items.length) + ' locks';
+  if (!rows.length) { $('#lk-tab').innerHTML = '<div class="empty">' + (d.items.length ? 'No locks match these filters.' : 'No locks in CPI right now.') + '</div>'; return; }
+  $('#lk-tab').innerHTML = '<table><thead><tr><th>Status</th><th>Component</th><th>Source</th><th>Entry</th><th>Locked since</th><th class="num">Age</th><th>Expires</th></tr></thead><tbody>' +
+    rows.map(function (l, i) {
+      return '<tr class="click" data-i="' + i + '"><td>' + lockPill(l) + '</td><td class="nowrap">' + esc(l.component) + '</td><td class="small">' + esc(l.source) + '</td>' +
+        '<td class="mono">' + esc(l.entry || l.lockName) + '</td><td class="nowrap">' + dt(l.createdAt) + '</td>' +
+        '<td class="num nowrap' + (l.state === 'expired' ? ' bad' : '') + '">' + esc(ago(l.ageMinutes)) + '</td><td class="nowrap">' + (l.releasedAt ? '<span class="muted">released ' + dt(l.releasedAt) + '</span>' : dt(l.expiresAt)) + '</td></tr>';
+    }).join('') + '</tbody></table>';
+  $$('#lk-tab tr[data-i]').forEach(function (t) { t.onclick = function () { openLock(rows[+t.dataset.i]); }; });
+}
+function openLock(l) {
+  openDrawer(drawerHead('Lock: ' + l.component) +
+    '<div class="row" style="margin-bottom:12px">' + lockPill(l) + '<span class="muted">locked ' + esc(ago(l.ageMinutes)) + ' ago</span></div>' +
+    '<div class="kv">' +
+      kv('Component', esc(l.component)) + kv('Source', '<span class="mono">' + esc(l.source) + '</span>') +
+      kv('Entry', '<span class="mono">' + esc(l.entry) + '</span>') + kv('Lock name', esc(l.lockName)) +
+      kv('Locked since', esc(dtFull(l.createdAt))) + kv('Expires', '<b>' + esc(dtFull(l.expiresAt)) + '</b>') +
+      kv('First seen', esc(dtFull(l.firstSeenAt))) + kv('Last seen in CPI', esc(dtFull(l.lastSeenAt))) +
+      (l.releasedAt ? kv('Released', '<b>' + esc(dtFull(l.releasedAt)) + '</b>') : '') +
+    '</div>' +
+    '<p class="muted small" style="margin-top:20px">To release a stuck lock, open Integration Suite → Monitor → Integrations and APIs → Manage Locks → Lock Entries, find this entry and choose Release. It disappears here after the next sync.</p>');
+}
+
+/* Message queues */
+function queuePill(q) { return '<span class="pill ' + (Q_PILL[q.state] || '') + '">' + esc(Q_STATES[q.state] || q.state) + '</span>'; }
+function loadQueues() {
+  var v = $('#v-queues');
+  if (!$('#qu-tab', v)) {
+    v.innerHTML = '<div class="grid kpis" id="qu-kpis"></div><div id="qu-warn"></div>' +
+      '<div class="filters mt"><select id="qf-state" aria-label="Status"></select>' +
+      '<input id="qf-q" type="search" placeholder="Search queue or iFlow name" style="min-width:240px;flex:1">' +
+      '<label class="check"><input type="checkbox" id="qf-busy"> Only queues with messages</label>' +
+      '<label class="check"><input type="checkbox" id="qf-removed"> Show removed</label>' +
+      '<button class="btn" id="qf-csv">Export CSV</button><button class="btn" id="qf-sync" hidden>Sync from CPI now</button></div>' +
+      '<div id="qu-stale"></div>' +
+      '<div class="card"><div class="row" style="margin-bottom:8px"><b id="qu-count"></b><span class="sp"></span><span class="muted small" id="qu-synced"></span></div><div class="scroll" id="qu-tab"></div></div>' +
+      '<p class="muted small">JMS message queues from CPI (Monitor → Integrations and APIs → Manage Stores → Message Queues). Open a queue to see its messages. ' +
+      'This page only shows queues; retry, move or delete messages in CPI. The data comes from the database, which the n8n workflow "CPI Locks &amp; Queues → Postgres" fills.</p>';
+    $('#qf-state').onchange = function () { S.qf.state = this.value; renderQueues(); };
+    $('#qf-q').oninput = function () { S.qf.q = this.value.trim().toLowerCase(); renderQueues(); };
+    $('#qf-busy').onchange = function () { S.qf.busy = this.checked; renderQueues(); };
+    $('#qf-removed').onchange = function () { S.qf.removed = this.checked; loadQueues().catch(fail); };
+    $('#qf-csv').onclick = function () { downloadCsv('cpi-message-queues.csv', ['state', 'name', 'messages', 'failed', 'oldest', 'sizeBytes', 'fillGrade', 'active', 'iflows'], S.cache.queueRows || []); };
+    $('#qf-sync').onclick = function () { syncRuntime(this, loadQueues); };
+  }
+  $('#qu-tab').innerHTML = '<div class="empty">Loading…</div>';
+  return get('api/queues', S.qf.removed ? { removed: 1 } : {}).then(function (d) {
+    if (!d.enabled) { v.innerHTML = '<div class="card"><h2>Message queues are not available yet</h2><p class="muted">' + esc(d.reason) + '</p></div>'; return; }
+    S.cache.queues = d;
+    setRuntimeBadges('queues', d);
+    renderQueues();
+  }, function (e) { $('#qu-tab').innerHTML = '<div class="empty bad">' + esc(e.message) + '</div>'; });
+}
+function renderQueues() {
+  var d = S.cache.queues, f = S.qf, sum = d.summary, b = d.broker;
+  var pctOf = function (a, m) { return a != null && m ? Math.round(a * 1000 / m) / 10 + '%' : '–'; };
+  $('#qu-kpis').innerHTML =
+    pickKpi('qf', 'busy', 'Messages in queues', fmt(sum.messages), sum.withMessages + ' of ' + sum.queues + ' queues have messages', sum.messages ? 'warn' : 'good') +
+    pickKpi('qf', 'failed', 'Failed messages', fmt(sum.failed), 'retries ran out, check in CPI', sum.failed ? 'alert' : 'good') +
+    pickKpi('qf', 'attention', 'Queues full or nearly full', fmt(sum.full + sum.critical), sum.inactive ? sum.inactive + ' inactive' : 'all active', sum.full + sum.critical ? 'alert' : 'good') +
+    (b ? '<div class="card kpi"><div class="l">Storage used</div><div class="v">' + pctOf(b.capacity, b.maxCapacity) + '</div><div class="s">' + esc(bytes(b.capacity) + ' of ' + bytes(b.maxCapacity)) + '</div></div>' +
+      '<div class="card kpi"><div class="l">Queues used</div><div class="v">' + fmt(b.queues) + ' / ' + fmt(b.maxQueues) + '</div><div class="s">JMS queue limit of the tenant</div></div>' : '');
+  kpiPick('#qu-kpis', 'qf', f.state, renderQueues);
+  $('#qu-warn').innerHTML = b && b.warnings.length ? '<div class="card mt"><b class="bad">JMS broker warning:</b> ' + esc(b.warnings.join(', ')) + '</div>' : '';
+  $('#qf-state').innerHTML = opts([['', 'All statuses'], ['attention', 'Needs attention (full, nearly full, failed, inactive)'], ['busy', 'Has messages'], ['full', 'Full'], ['critical', 'Nearly full'], ['failed', 'Failed messages'], ['inactive', 'Inactive'], ['ok', 'OK']], f.state);
+  $('#qf-busy').checked = f.busy;
+  $('#qf-removed').checked = f.removed;
+  $('#qf-sync').hidden = !d.canSync;
+  $('#qu-synced').textContent = syncedText(d);
+  $('#qu-stale').innerHTML = staleBox(d, 'queue');
+  var rows = d.items.filter(function (q) {
+    if (f.state === 'attention' && ['full', 'critical', 'failed', 'inactive'].indexOf(q.state) < 0) return false;
+    if (f.state === 'busy' && !(q.messages > 0)) return false;
+    if (f.state && ['attention', 'busy'].indexOf(f.state) < 0 && q.state !== f.state) return false;
+    if (f.busy && !(q.messages > 0)) return false;
+    if (f.q && [q.name].concat(q.iflows).join(' ').toLowerCase().indexOf(f.q) < 0) return false;
+    return true;
+  });
+  S.cache.queueRows = rows;
+  $('#qu-count').textContent = fmt(rows.length) + ' of ' + fmt(d.items.length) + ' queues';
+  if (!rows.length) { $('#qu-tab').innerHTML = '<div class="empty">' + (d.items.length ? 'No queues match these filters.' : 'No message queues in CPI.') + '</div>'; return; }
+  $('#qu-tab').innerHTML = '<table><thead><tr><th>Status</th><th>Queue</th><th class="num">Messages</th><th class="num">Failed</th><th>Oldest message</th><th class="num">Size</th><th class="num">Fill</th><th>Used by iFlows</th></tr></thead><tbody>' +
+    rows.map(function (q, i) {
+      return '<tr class="click" data-i="' + i + '"><td>' + queuePill(q) + '</td><td><b>' + esc(q.name) + '</b></td>' +
+        '<td class="num">' + (q.messages ? '<b>' + fmt(q.messages) + '</b>' : '<span class="muted">0</span>') + '</td>' +
+        '<td class="num' + (q.failed ? ' bad' : '') + '">' + (q.failed ? fmt(q.failed) : '<span class="muted">0</span>') + '</td>' +
+        '<td class="nowrap">' + (q.oldest ? dt(q.oldest) + '<div class="muted small">' + esc(ago(minutesSince(q.oldest))) + ' ago</div>' : '<span class="muted">–</span>') + '</td>' +
+        '<td class="num nowrap">' + esc(bytes(q.sizeBytes)) + '</td><td class="num">' + (q.fillGrade != null ? q.fillGrade + '%' : '–') + '</td>' +
+        '<td class="small">' + q.iflows.map(esc).join('<br>') + '</td></tr>';
+    }).join('') + '</tbody></table>';
+  $$('#qu-tab tr[data-i]').forEach(function (t) { t.onclick = function () { openQueue(rows[+t.dataset.i].name); }; });
+}
+function openQueue(name) {
+  openDrawer(drawerHead('Queue: ' + name) + '<div class="empty">Loading…</div>');
+  get('api/queues/' + encodeURIComponent(name)).then(function (d) {
+    var q = d.queue, ms = d.messages;
+    openDrawer(drawerHead('Queue: ' + q.name) +
+      '<div class="row" style="margin-bottom:12px">' + queuePill(q) + '<span class="muted">' + fmt(q.messages) + ' messages, ' + esc(bytes(q.sizeBytes)) + '</span></div>' +
+      '<div class="kv">' +
+        kv('Queue', '<b>' + esc(q.name) + '</b>') + kv('Messages', fmt(q.messages)) + kv('Failed', q.failed ? '<b class="bad">' + fmt(q.failed) + '</b>' : '0') +
+        kv('Size', esc(bytes(q.sizeBytes))) + kv('Fill', q.fillGrade != null ? q.fillGrade + '%' : '–') +
+        kv('Active', q.active == null ? '–' : q.active ? 'Yes' : '<b class="bad">No</b>') + kv('Exclusive', q.exclusive ? 'Yes' : 'No') +
+        kv('Used by iFlows', q.iflows.map(esc).join('<br>') || '<span class="muted">none found</span>') +
+        kv('First seen', esc(dtFull(q.firstSeenAt))) + kv('Last seen in CPI', esc(dtFull(q.lastSeenAt))) +
+        (q.removedAt ? kv('Removed', '<b>' + esc(dtFull(q.removedAt)) + '</b>') : '') +
+      '</div>' +
+      '<h3>Messages in the queue <small class="muted">(' + (ms.length < (q.messages || 0) ? 'showing ' + fmt(ms.length) + ' of ' + fmt(q.messages) : fmt(ms.length)) + ', as of the last sync)</small></h3>' +
+      (ms.length ? '<div class="scroll"><table><thead><tr><th>Status</th><th>Created</th><th class="num">Retries</th><th>Next retry</th><th>Sender → receiver</th><th>Message</th></tr></thead><tbody>' +
+        ms.map(function (m) {
+          var mpl = m.mplId ? (m.hasMpl ? '<a href="#" data-g="' + esc(m.mplId) + '">' + esc(m.flow || m.mplId) + '</a> ' + pill(m.mplStatus) : '<span class="mono">' + esc(m.mplId) + '</span>') : '';
+          return '<tr><td>' + (m.failed ? '<span class="pill cert-critical">Failed</span>' : '<span class="pill tk">Waiting</span>') + '</td>' +
+            '<td class="nowrap">' + dt(m.createdAt) + '</td><td class="num">' + fmt(m.retryCount) + '</td><td class="nowrap">' + (m.nextRetry ? dt(m.nextRetry) : '<span class="muted">–</span>') + '</td>' +
+            '<td class="small">' + esc([m.sender, m.receiver].filter(Boolean).join(' → ')) + (m.messageType ? '<div class="muted">' + esc(m.messageType) + '</div>' : '') + '</td>' +
+            '<td class="small">' + mpl + (m.applicationId ? '<div class="muted">App ID ' + esc(m.applicationId) + '</div>' : '') + (m.customStatus ? '<div class="muted">' + esc(m.customStatus) + '</div>' : '') + '</td></tr>';
+        }).join('') + '</tbody></table></div>'
+        : '<div class="empty">' + (q.messages ? 'The messages were not read at the last sync.' : 'The queue is empty.') + '</div>') +
+      '<p class="muted small" style="margin-top:20px">Retry, move or delete messages in Integration Suite → Monitor → Integrations and APIs → Manage Stores → Message Queues. A message link opens its error in this app when the message processing log is in the database.</p>');
+    $$('#dr a[data-g]').forEach(function (a) { a.onclick = function (e) { e.preventDefault(); openDetail(a.dataset.g); }; });
+  }).catch(function (e) { openDrawer(drawerHead('Queue: ' + name) + '<div class="empty bad">' + esc(e.message) + '</div>'); });
+}
+
 /* ---------- Ticket pulse ---------- */
 S.tf = { view: 'all', grp: '', responder: '', q: '' };
 // Ticket pulse time view: 'day' follows the period picker; week / month / year show the last 12 weeks, 12 months or 5 years.
@@ -728,8 +972,8 @@ function tkMonths() {
 function tkPicked() { return S.tp === 'month' && S.tkMonth ? S.tkMonth : ''; }
 function tkSpan() { return tkPicked() ? 'in ' + monthName(tkPicked()) : TP[S.tp].span; }
 function syncRangeVisibility() {
-  // Certificates do not depend on the period; Ticket pulse only uses it in the daily view.
-  $('#range').hidden = S.tab === 'certs' || (S.tab === 'tickets' && S.tp !== 'day');
+  // Certificates, locks and queues do not depend on the period; Ticket pulse only uses it in the daily view.
+  $('#range').hidden = ['certs', 'locks', 'queues'].indexOf(S.tab) >= 0 || (S.tab === 'tickets' && S.tp !== 'day');
 }
 function setTicketView(tp) {
   S.tp = tp;

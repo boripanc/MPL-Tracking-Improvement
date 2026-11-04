@@ -131,3 +131,75 @@ CREATE TABLE IF NOT EXISTS kanban_oauth (
   data       jsonb NOT NULL DEFAULT '{}',
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- ---------------------------------------------------------------------------------------------
+-- CPI runtime: lock entries (Monitor > Manage Locks) and JMS message queues (Monitor > Message
+-- Queues). Filled by the n8n workflow "CPI Locks & Queues → Postgres" or by this app's own sync;
+-- the web pages only read these tables.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS cpi_locks (
+  component     text NOT NULL,         -- (S)FTP, Aggregator, ...
+  hex_source    text NOT NULL,
+  hex_entry     text NOT NULL,
+  source        text,                  -- e.g. the SFTP user@host or the aggregator name
+  entry         text,                  -- e.g. the locked file path
+  lock_name     text,
+  created_at    timestamptz,
+  expires_at    timestamptz,
+  raw           jsonb,
+  first_seen_at timestamptz NOT NULL DEFAULT now(),
+  last_seen_at  timestamptz NOT NULL DEFAULT now(),
+  released_at   timestamptz,           -- set when the lock is no longer in CPI
+  PRIMARY KEY (component, hex_source, hex_entry)
+);
+
+CREATE TABLE IF NOT EXISTS cpi_jms_queues (
+  name          text PRIMARY KEY,
+  messages      bigint,
+  size_bytes    bigint,
+  queue_type    integer,
+  state         integer,               -- 0 OK, 1 nearly full, 2 full (exhausted)
+  fill_grade    integer,
+  active        boolean,
+  exclusive     boolean,
+  artifacts     jsonb,                 -- iFlows that use the queue: [{ name, id, direction }]
+  raw           jsonb,
+  first_seen_at timestamptz NOT NULL DEFAULT now(),
+  last_seen_at  timestamptz NOT NULL DEFAULT now(),
+  removed_at    timestamptz            -- set when the queue no longer exists in CPI
+);
+
+CREATE TABLE IF NOT EXISTS cpi_jms_messages (
+  queue_name     text NOT NULL,
+  msgid          text NOT NULL,
+  failed         boolean,
+  mpl_id         text,                 -- message processing log ID (message_guid)
+  created_at     timestamptz,
+  retry_count    integer,
+  next_retry     timestamptz,
+  overdue_at     timestamptz,
+  expires_at     timestamptz,
+  sender         text,
+  receiver       text,
+  message_type   text,
+  application_id text,
+  correlation_id text,
+  custom_status  text,
+  raw            jsonb,
+  first_seen_at  timestamptz NOT NULL DEFAULT now(),
+  last_seen_at   timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (queue_name, msgid)
+);
+
+CREATE TABLE IF NOT EXISTS cpi_runtime_sync (
+  id             serial PRIMARY KEY,
+  synced_at      timestamptz NOT NULL DEFAULT now(),
+  source         text,                 -- n8n or app
+  locks_ok       boolean NOT NULL,     -- false when CPI did not return the locks this time
+  queues_ok      boolean NOT NULL,
+  locks          integer NOT NULL,
+  locks_released integer NOT NULL,
+  queues         integer NOT NULL,
+  messages       bigint NOT NULL,
+  broker         jsonb                 -- JmsBrokers('Broker1'): capacity and queue limits
+);

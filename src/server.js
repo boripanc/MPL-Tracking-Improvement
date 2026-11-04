@@ -7,6 +7,7 @@ const { createPool } = require('./db');
 const { createApp } = require('./app');
 const { startPoller } = require('./poller/cpi');
 const { startCertificateSync } = require('./cpi/certificates');
+const { startRuntimeSync } = require('./cpi/runtime');
 
 const config = loadConfig(process.env);
 const problems = validateConfig(config);
@@ -19,6 +20,7 @@ if (config.auth.disabled) console.warn('[auth] AUTH_DISABLED=true: anyone who ca
 console.log(envFiles.length ? `Settings read from ${envFiles.join(', ')} and the environment` : 'No .env file found; using environment variables only');
 if (cpiConfigured(config)) {
   console.log(`[certificates] read from the database; this server also syncs the keystore from ${new URL(config.poller.apiUrl).host} every ${config.certificates.syncIntervalMinutes} min`);
+  console.log(`[locks/queues] read from the database; this server also syncs them from CPI every ${config.runtime.syncIntervalMinutes} min`);
 } else {
   console.log(`[certificates] read from the database (filled by n8n); no CPI connection here (${missingCpiVars(config).join(', ')} not set), so no sync from this server`);
 }
@@ -33,6 +35,9 @@ const poller = config.poller.enabled ? startPoller({ pool, config: config.poller
 const certSync = app.locals.certificates.canSync
   ? startCertificateSync({ store: app.locals.certificates, intervalMinutes: config.certificates.syncIntervalMinutes })
   : null;
+const runtimeSync = app.locals.runtime.canSync
+  ? startRuntimeSync({ store: app.locals.runtime, intervalMinutes: config.runtime.syncIntervalMinutes })
+  : null;
 
 let stopping = false;
 async function shutdown(signal) {
@@ -41,6 +46,7 @@ async function shutdown(signal) {
   console.log(`${signal} received, shutting down`);
   if (poller) poller.stop();
   if (certSync) certSync.stop();
+  if (runtimeSync) runtimeSync.stop();
   server.close(() => pool.end().finally(() => process.exit(0)));
   setTimeout(() => process.exit(1), 10000).unref();
 }
