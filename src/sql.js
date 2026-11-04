@@ -278,6 +278,170 @@ SELECT json_build_object(
       ORDER BY valid_to NULLS LAST, alias) k)
 ) AS result`;
 
+/* ---------- Locks and JMS message queues (CPI runtime, stored in the database) ---------- */
+
+// Epoch milliseconds ("1793279156662"), OData "/Date(ms)/" or an ISO string; 0 and empty mean "none".
+const msTs = (x) => `CASE WHEN COALESCE(${x}, '') IN ('', '0') THEN NULL
+      WHEN ${x} ~ '^-?[0-9]+$' THEN to_timestamp((${x})::bigint / 1000.0)
+      WHEN ${x} LIKE '/Date(%' THEN to_timestamp(substring(${x} from '-?[0-9]+')::bigint / 1000.0)
+      ELSE (${x})::timestamptz END`;
+const odataInt = (x) => `CASE WHEN ${x} ~ '^-?[0-9]+$' THEN (${x})::bigint END`;
+const odataBool = (x) => `CASE WHEN ${x} IN ('1', 'true') THEN true WHEN ${x} IN ('0', 'false') THEN false END`;
+
+// $1 = { source, locks: [raw Locks] | null, broker: {raw JmsBroker} | null, queues: [raw Queues + Artifacts] | null }.
+// null (or missing) means "CPI did not answer this time": that part is left as it is. An empty list means
+// "there are none": every stored lock is marked released / every queue removed. Messages of queues that are
+// now empty or gone are deleted; the messages themselves are stored by syncQueueMessages.
+// The same statement is used by the n8n workflow "CPI Locks & Queues → Postgres".
+const syncRuntime = `WITH p AS (SELECT $1::jsonb AS j),
+f AS (SELECT jsonb_typeof(j->'locks') = 'array' AS locks_ok, jsonb_typeof(j->'queues') = 'array' AS queues_ok FROM p),
+lk AS (
+  SELECT DISTINCT ON (component, hex_source, hex_entry) * FROM (
+    SELECT r->>'Component' AS component,
+           COALESCE(NULLIF(r->>'HexSource', ''), encode(convert_to(COALESCE(r->>'Source', ''), 'UTF8'), 'hex')) AS hex_source,
+           COALESCE(NULLIF(r->>'HexEntry', ''), encode(convert_to(COALESCE(r->>'Entry', ''), 'UTF8'), 'hex')) AS hex_entry,
+           r->>'Source' AS source, r->>'Entry' AS entry, r->>'LockName' AS lock_name,
+           ${msTs("r->>'CreationTime'")} AS created_at,
+           ${msTs("r->>'ExpirationTime'")} AS expires_at,
+           r - '__metadata' AS raw
+    FROM p, f, jsonb_array_elements(CASE WHEN f.locks_ok THEN p.j->'locks' ELSE '[]'::jsonb END) AS r
+    WHERE COALESCE(r->>'Component', '') <> '') x),
+lk_up AS (
+  INSERT INTO cpi_locks (component, hex_source, hex_entry, source, entry, lock_name, created_at, expires_at, raw,
+                         first_seen_at, last_seen_at, released_at)
+  SELECT component, hex_source, hex_entry, source, entry, lock_name, created_at, expires_at, raw, now(), now(), NULL FROM lk
+  ON CONFLICT (component, hex_source, hex_entry) DO UPDATE SET
+    source = EXCLUDED.source, entry = EXCLUDED.entry, lock_name = EXCLUDED.lock_name, created_at = EXCLUDED.created_at,
+    expires_at = EXCLUDED.expires_at, raw = EXCLUDED.raw, last_seen_at = now(), released_at = NULL
+  RETURNING 1),
+lk_gone AS (
+  UPDATE cpi_locks l SET released_at = now()
+  FROM f WHERE f.locks_ok AND l.released_at IS NULL
+    AND NOT EXISTS (SELECT 1 FROM lk WHERE lk.component = l.component AND lk.hex_source = l.hex_source AND lk.hex_entry = l.hex_entry)
+  RETURNING 1),
+lk_purge AS (
+  DELETE FROM cpi_locks l WHERE l.released_at < now() - interval '30 days'
+    AND NOT EXISTS (SELECT 1 FROM lk WHERE lk.component = l.component AND lk.hex_source = l.hex_source AND lk.hex_entry = l.hex_entry)
+  RETURNING 1),
+q AS (
+  SELECT DISTINCT ON (name) * FROM (
+    SELECT r->>'Name' AS name,
+           ${odataInt("r->>'NumbOfMsgs'")} AS messages, ${odataInt("r->>'Size'")} AS size_bytes,
+           ${odataInt("r->>'Type'")}::int AS queue_type, ${odataInt("r->>'State'")}::int AS state,
+           ${odataInt("r->>'FillGrade'")}::int AS fill_grade,
+           ${odataBool("r->>'Active'")} AS active, ${odataBool("r->>'Exclusive'")} AS exclusive,
+           CASE WHEN jsonb_typeof(r->'Artifacts') = 'array' THEN r->'Artifacts' END AS artifacts,
+           r - '__metadata' - 'Messages' - 'Artifacts' - 'JmsQueues' - 'Broker' AS raw
+    FROM p, f, jsonb_array_elements(CASE WHEN f.queues_ok THEN p.j->'queues' ELSE '[]'::jsonb END) AS r
+    WHERE COALESCE(r->>'Name', '') <> '') x),
+q_up AS (
+  INSERT INTO cpi_jms_queues (name, messages, size_bytes, queue_type, state, fill_grade, active, exclusive, artifacts, raw,
+                              first_seen_at, last_seen_at, removed_at)
+  SELECT name, messages, size_bytes, queue_type, state, fill_grade, active, exclusive, artifacts, raw, now(), now(), NULL FROM q
+  ON CONFLICT (name) DO UPDATE SET
+    messages = EXCLUDED.messages, size_bytes = EXCLUDED.size_bytes, queue_type = EXCLUDED.queue_type, state = EXCLUDED.state,
+    fill_grade = EXCLUDED.fill_grade, active = EXCLUDED.active, exclusive = EXCLUDED.exclusive,
+    artifacts = COALESCE(EXCLUDED.artifacts, cpi_jms_queues.artifacts), raw = EXCLUDED.raw, last_seen_at = now(), removed_at = NULL
+  RETURNING 1),
+q_gone AS (
+  UPDATE cpi_jms_queues t SET removed_at = now()
+  FROM f WHERE f.queues_ok AND t.removed_at IS NULL AND NOT EXISTS (SELECT 1 FROM q WHERE q.name = t.name)
+  RETURNING 1),
+m_gone AS (
+  DELETE FROM cpi_jms_messages m USING f
+  WHERE f.queues_ok AND NOT EXISTS (SELECT 1 FROM q WHERE q.name = m.queue_name AND COALESCE(q.messages, 1) > 0)
+  RETURNING 1),
+log AS (
+  INSERT INTO cpi_runtime_sync (source, locks_ok, queues_ok, locks, locks_released, queues, messages, broker)
+  SELECT COALESCE(j->>'source', 'unknown'), f.locks_ok, f.queues_ok, (SELECT count(*) FROM lk_up), (SELECT count(*) FROM lk_gone),
+         (SELECT count(*) FROM q_up), COALESCE((SELECT sum(messages) FROM q), 0),
+         CASE WHEN jsonb_typeof(j->'broker') = 'object' THEN (j->'broker') - '__metadata' - 'QueueNamesHigh' - 'InactiveQueues' - 'QueueStates' END
+  FROM p, f WHERE f.locks_ok OR f.queues_ok
+  RETURNING id, synced_at, source, locks_ok, queues_ok, locks, locks_released, queues, messages)
+SELECT (SELECT row_to_json(log) FROM log) AS result, (SELECT count(*) FROM lk_purge) AS purged, (SELECT count(*) FROM q_gone) AS queues_removed,
+       (SELECT count(*) FROM m_gone) AS messages_removed`;
+
+// $1 = { queues: [{ name, messages: [raw JmsMessages of Queues('name')/Messages] }] }. Replaces the stored
+// messages of each listed queue (a queue without a messages list is left as it is).
+const syncQueueMessages = `WITH p AS (SELECT $1::jsonb AS j),
+qs AS (
+  SELECT r->>'name' AS name, r->'messages' AS msgs
+  FROM p, jsonb_array_elements(CASE WHEN jsonb_typeof(p.j->'queues') = 'array' THEN p.j->'queues' ELSE '[]'::jsonb END) AS r
+  WHERE COALESCE(r->>'name', '') <> '' AND jsonb_typeof(r->'messages') = 'array'),
+m AS (
+  SELECT DISTINCT ON (queue_name, msgid) * FROM (
+    SELECT qs.name AS queue_name, x->>'Msgid' AS msgid, ${odataBool("x->>'Failed'")} AS failed, x->>'Mplid' AS mpl_id,
+           ${msTs("x->>'CreatedAt'")} AS created_at, ${odataInt("x->>'RetryCount'")}::int AS retry_count,
+           ${msTs("x->>'NextRetry'")} AS next_retry, ${msTs("x->>'OverdueAt'")} AS overdue_at,
+           ${msTs("x->>'ExpirationDate'")} AS expires_at,
+           x->>'SapSender' AS sender, x->>'SapReceiver' AS receiver, x->>'SapMsgType' AS message_type,
+           x->>'SapApplicationId' AS application_id, x->>'SapMplCorrelationId' AS correlation_id,
+           x->>'SapMessageProcessingLogCustomStatus' AS custom_status, x - '__metadata' - 'Queue' AS raw
+    FROM qs, jsonb_array_elements(qs.msgs) AS x
+    WHERE COALESCE(x->>'Msgid', '') <> '') y
+  ORDER BY queue_name, msgid, failed DESC NULLS LAST),
+del AS (
+  DELETE FROM cpi_jms_messages t USING qs
+  WHERE t.queue_name = qs.name AND NOT EXISTS (SELECT 1 FROM m WHERE m.queue_name = t.queue_name AND m.msgid = t.msgid)
+  RETURNING 1),
+up AS (
+  INSERT INTO cpi_jms_messages (queue_name, msgid, failed, mpl_id, created_at, retry_count, next_retry, overdue_at, expires_at,
+                                sender, receiver, message_type, application_id, correlation_id, custom_status, raw,
+                                first_seen_at, last_seen_at)
+  SELECT queue_name, msgid, failed, mpl_id, created_at, retry_count, next_retry, overdue_at, expires_at, sender, receiver,
+         message_type, application_id, correlation_id, custom_status, raw, now(), now() FROM m
+  ON CONFLICT (queue_name, msgid) DO UPDATE SET
+    failed = EXCLUDED.failed, mpl_id = EXCLUDED.mpl_id, created_at = EXCLUDED.created_at, retry_count = EXCLUDED.retry_count,
+    next_retry = EXCLUDED.next_retry, overdue_at = EXCLUDED.overdue_at, expires_at = EXCLUDED.expires_at,
+    sender = EXCLUDED.sender, receiver = EXCLUDED.receiver, message_type = EXCLUDED.message_type,
+    application_id = EXCLUDED.application_id, correlation_id = EXCLUDED.correlation_id, custom_status = EXCLUDED.custom_status,
+    raw = EXCLUDED.raw, last_seen_at = now()
+  RETURNING 1)
+SELECT json_build_object('queues', (SELECT count(*) FROM qs), 'messages', (SELECT count(*) FROM up), 'removed', (SELECT count(*) FROM del)) AS result`;
+
+const lastRuntimeSync = (flag) => `(SELECT row_to_json(s) FROM (
+      SELECT synced_at, source, locks, locks_released, queues, messages, broker FROM cpi_runtime_sync
+      WHERE ${flag} ORDER BY synced_at DESC, id DESC LIMIT 1) s)`;
+
+// $1 = { releasedDays }: current locks, plus the ones released in the last releasedDays days (0 = none).
+const readLocks = `WITH p AS (SELECT $1::jsonb AS j)
+SELECT json_build_object(
+  'lastSync', ${lastRuntimeSync('locks_ok')},
+  'items', (SELECT COALESCE(json_agg(l ORDER BY l.released_at DESC NULLS FIRST, l.created_at NULLS LAST), '[]') FROM (
+      SELECT component, hex_source, hex_entry, source, entry, lock_name, created_at, expires_at, first_seen_at, last_seen_at, released_at
+      FROM cpi_locks, p
+      WHERE released_at IS NULL OR released_at > now() - make_interval(days => COALESCE((j->>'releasedDays')::int, 0))) l)
+) AS result`;
+
+const readQueues = `WITH p AS (SELECT $1::jsonb AS j),
+mm AS (SELECT queue_name, count(*) FILTER (WHERE failed) AS failed, min(created_at) AS oldest, max(retry_count) AS max_retries
+       FROM cpi_jms_messages GROUP BY queue_name)
+SELECT json_build_object(
+  'lastSync', ${lastRuntimeSync('queues_ok')},
+  'items', (SELECT COALESCE(json_agg(x ORDER BY x.messages DESC NULLS LAST, x.name), '[]') FROM (
+      SELECT q.name, q.messages, q.size_bytes, q.queue_type, q.state, q.fill_grade, q.active, q.exclusive,
+             COALESCE(q.artifacts, '[]') AS artifacts, q.first_seen_at, q.last_seen_at, q.removed_at,
+             COALESCE(mm.failed, 0) AS failed, mm.oldest, mm.max_retries
+      FROM cpi_jms_queues q LEFT JOIN mm ON mm.queue_name = q.name, p
+      WHERE q.removed_at IS NULL OR (j->>'includeRemoved')::boolean) x)
+) AS result`;
+
+// $1 = { name }: one queue with its stored messages (newest first, at most 500).
+const readQueue = `WITH p AS (SELECT $1::jsonb AS j)
+SELECT json_build_object(
+  'queue', (SELECT row_to_json(q) FROM (SELECT name, messages, size_bytes, queue_type, state, fill_grade, active, exclusive,
+              COALESCE(artifacts, '[]') AS artifacts, first_seen_at, last_seen_at, removed_at
+            FROM cpi_jms_queues, p WHERE name = j->>'name') q),
+  'messages', (SELECT COALESCE(json_agg(m ORDER BY m.created_at DESC NULLS LAST), '[]') FROM (
+      SELECT jm.msgid, jm.failed, jm.mpl_id, jm.created_at, jm.retry_count, jm.next_retry, jm.overdue_at, jm.expires_at,
+             jm.sender, jm.receiver, jm.message_type, jm.application_id, jm.correlation_id, jm.custom_status, jm.last_seen_at,
+             mpl.integration_flow_name AS flow, mpl.status AS mpl_status, (mpl.message_guid IS NOT NULL) AS has_mpl
+      FROM p, cpi_jms_messages jm
+      LEFT JOIN message_processing_logs mpl ON mpl.message_guid = jm.mpl_id
+      WHERE jm.queue_name = j->>'name'
+      ORDER BY jm.created_at DESC NULLS LAST LIMIT 500) m)
+) AS result`;
+
 /* ---------- Used by the optional CPI poller ---------- */
 
 // $1 = JSON array of MPL rows. Returns the GUIDs that still have no error text.
@@ -312,4 +476,5 @@ module.exports = {
   categories, saveCategory, deleteCategory, testMatch,
   upsertMpls, upsertErrorInformation,
   syncKeystore, readCertificates,
+  syncRuntime, syncQueueMessages, readLocks, readQueues, readQueue,
 };

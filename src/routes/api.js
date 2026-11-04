@@ -100,7 +100,7 @@ async function kanbanCall(fn) {
 
 /* ---------- router ---------- */
 
-function apiRouter({ pool, config, certificates, tickets, kanban }) {
+function apiRouter({ pool, config, certificates, runtime, tickets, kanban }) {
   const router = express.Router();
   const run = (sql, params) => queryResult(pool, sql, params);
   const handle = (fn) => (req, res, next) => {
@@ -117,6 +117,7 @@ function apiRouter({ pool, config, certificates, tickets, kanban }) {
     user: req.user || null,
     authDisabled: Boolean(config.auth.disabled),
     certificatesCanSync: certificates.canSync,
+    runtimeCanSync: runtime.canSync,
     kanban: await kanban.status().catch(() => ({ enabled: kanban.enabled, connected: false })),
   })));
 
@@ -323,6 +324,30 @@ function apiRouter({ pool, config, certificates, tickets, kanban }) {
     } catch (err) {
       console.error('[certificates] sync failed:', err.message);
       throw new HttpError(502, `Could not read the keystore from CPI: ${err.message}`);
+    }
+  }));
+
+  // Locks and JMS message queues, read from the database (filled by the n8n workflow or the app's own sync).
+  router.get('/locks', handle((req) => runtime.locks({ releasedDays: int(req.query.released, 'released', { min: 0, max: 30, fallback: 0 }) })));
+
+  router.get('/queues', handle((req) => runtime.queues({ includeRemoved: req.query.removed === '1' })));
+
+  router.get('/queues/:name', handle(async (req) => {
+    const q = await runtime.queue(text(req.params.name, 'name', 300, { required: true }));
+    if (!q) throw new HttpError(404, 'Queue not found');
+    return q;
+  }));
+
+  // Copy locks and queues from CPI into the database now (only when this server has a CPI connection).
+  router.post('/runtime/sync', handle(async () => {
+    if (!runtime.canSync) {
+      throw new HttpError(409, 'This server has no CPI connection, so it cannot sync. The n8n workflow "CPI Locks & Queues → Postgres" keeps the data up to date.');
+    }
+    try {
+      return await runtime.sync({ source: 'app' });
+    } catch (err) {
+      console.error('[locks/queues] sync failed:', err.message);
+      throw new HttpError(502, `Could not read locks and queues from CPI: ${err.message}`);
     }
   }));
 
