@@ -4,6 +4,10 @@
  * Login for the app. Every page and API call needs a signed-in user; only /healthz, the login page and its
  * stylesheet are open.
  *
+ * - With SSO set up (SSO_ISSUER, SSO_CLIENT_ID; see src/sso.js) the login page shows "Sign in with SSO": people
+ *   sign in with their company account, limited to SSO_ALLOWED_DOMAINS / SSO_ALLOWED_USERS. SSO_ONLY=true hides
+ *   the user/password form.
+ *
  * - People sign in on /login with one of the APP_USERS accounts and get a session cookie. The session ends after
  *   SESSION_IDLE_MINUTES without activity, after SESSION_MAX_HOURS in any case, on "Sign out", when the user's
  *   password changes in APP_USERS, and (without SESSION_SECRET) when the server restarts.
@@ -13,6 +17,10 @@
 const crypto = require('crypto');
 
 const COOKIE = 'cpi_session';
+const FLOW_COOKIE = 'cpi_sso'; // state, nonce and PKCE verifier while the person is at the SSO sign-in page
+const FLOW_MS = 10 * 60 * 1000;
+const SSO_START = '/login/sso';
+const SSO_CALLBACK = '/login/sso/callback';
 const PUBLIC_PATHS = new Set(['/login', '/logout', '/styles.css']);
 const MAX_FAILURES = 10; // per client address, within FAILURE_WINDOW_MS
 const FAILURE_WINDOW_MS = 15 * 60 * 1000;
@@ -48,7 +56,9 @@ function safeNext(next) {
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-function loginPage({ next, message, bad }) {
+function loginPage({ next, message, bad, sso }) {
+  const ssoOn = sso && sso.enabled;
+  const showForm = !(ssoOn && sso.only);
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -62,6 +72,8 @@ function loginPage({ next, message, bad }) {
   .login label{display:grid;gap:4px}
   .login input{width:100%}
   .login h1{margin-bottom:14px}
+  .login .sso{display:block;text-align:center;text-decoration:none}
+  .login .or{text-align:center;margin:14px 0 10px}
 </style>
 </head>
 <body>
@@ -69,12 +81,14 @@ function loginPage({ next, message, bad }) {
   <div class="card">
     <h1>CPI Error Center</h1>
     ${message ? `<p class="small ${bad ? 'bad' : 'muted'}" role="alert">${esc(message)}</p>` : ''}
-    <form method="post" action="/login">
+    ${ssoOn ? `<a class="btn pri sso" id="sso" href="${SSO_START}?next=${encodeURIComponent(next)}">${esc(sso.label || 'Sign in with SSO')}</a>` : ''}
+    ${ssoOn && showForm ? '<p class="muted small or">or with a user and password</p>' : ''}
+    ${showForm ? `<form method="post" action="/login">
       <input type="hidden" name="next" value="${esc(next)}">
-      <label>User <input name="user" autocomplete="username" required autofocus></label>
+      <label>User <input name="user" autocomplete="username" required${ssoOn ? '' : ' autofocus'}></label>
       <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
-      <button class="btn pri" type="submit">Sign in</button>
-    </form>
+      <button class="btn${ssoOn ? '' : ' pri'}" type="submit">Sign in</button>
+    </form>` : ''}
   </div>
 </main>
 </body>
@@ -83,9 +97,10 @@ function loginPage({ next, message, bad }) {
 
 /**
  * Express middleware that requires a signed-in user and serves /login and /logout.
- * Options: users [{ user, pass }], disabled, sessionSecret, idleMinutes, maxHours.
+ * Options: users [{ user, pass }], disabled, sessionSecret, idleMinutes, maxHours, and ssoClient (from createSso).
  */
-function requireLogin({ users = [], disabled = false, sessionSecret = '', idleMinutes = 60, maxHours = 12 } = {}) {
+function requireLogin({ users = [], disabled = false, sessionSecret = '', idleMinutes = 60, maxHours = 12, ssoClient = null } = {}) {
+  const sso = ssoClient && ssoClient.enabled ? ssoClient : null;
   if (disabled) {
     return (req, res, next) => {
       if (req.path === '/login' || req.path === '/logout') return res.redirect(303, '/');
@@ -103,9 +118,15 @@ function requireLogin({ users = [], disabled = false, sessionSecret = '', idleMi
   // Ties a session to the password it was opened with: a new password in APP_USERS ends old sessions.
   const passTag = (u) => mac(`pass:${u.user}:${u.pass}`).slice(0, 16);
 
+  const sealed = (v) => { const data = Buffer.from(JSON.stringify(v)).toString('base64url'); return `${data}.${mac(data)}`; };
+  function unseal(raw) {
+    const [data, sig] = String(raw || '').split('.');
+    if (!data || !sig || !safeEqual(mac(data), sig)) return null;
+    try { return JSON.parse(Buffer.from(data, 'base64url').toString('utf8')); } catch { return null; }
+  }
+
   function issue(res, req, s) {
-    const data = Buffer.from(JSON.stringify(s)).toString('base64url');
-    res.append('Set-Cookie', `${COOKIE}=${data}.${mac(data)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.ceil(maxMs / 1000)}${req.secure ? '; Secure' : ''}`);
+    res.append('Set-Cookie', `${COOKIE}=${sealed(s)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.ceil(maxMs / 1000)}${req.secure ? '; Secure' : ''}`);
   }
   function clear(res, req) {
     res.append('Set-Cookie', `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${req.secure ? '; Secure' : ''}`);
@@ -113,14 +134,12 @@ function requireLogin({ users = [], disabled = false, sessionSecret = '', idleMi
 
   /** The session in the cookie, if it is genuine, not expired and its user and password still exist. */
   function session(req) {
-    const raw = parseCookies(req.headers.cookie)[COOKIE];
-    if (!raw) return null;
-    const [data, sig] = raw.split('.');
-    if (!data || !sig || !safeEqual(mac(data), sig)) return null;
-    let s;
-    try { s = JSON.parse(Buffer.from(data, 'base64url').toString('utf8')); } catch { return null; }
+    const s = unseal(parseCookies(req.headers.cookie)[COOKIE]);
     const now = Date.now();
     if (!s || typeof s.u !== 'string' || !(now - s.iat < maxMs) || !(now - s.seen < idleMs)) return null;
+    // SSO sessions: still allowed only while SSO is on and the person is still in the allowed list.
+    if (s.k === 'sso') return sso && sso.allowed(s.u) ? s : null;
+    if (sso && sso.only) return null;
     const u = users.find((x) => x.user === s.u);
     if (!u || !safeEqual(passTag(u), s.p)) return null;
     return s;
@@ -156,8 +175,58 @@ function requireLogin({ users = [], disabled = false, sessionSecret = '', idleMi
     });
   }
 
+  /** This app's address as the browser sees it (behind a reverse proxy: X-Forwarded-Host with TRUST_PROXY). */
+  function origin(req) {
+    const fwd = req.app.get('trust proxy') && req.get('x-forwarded-host');
+    return `${req.protocol}://${fwd ? fwd.split(',')[0].trim() : req.get('host')}`;
+  }
+  const flowCookie = (req, value, maxAge) => `${FLOW_COOKIE}=${value}; Path=${SSO_START}; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${req.secure ? '; Secure' : ''}`;
+
+  async function ssoStart(req, res, page) {
+    try {
+      const { url, flow } = await sso.start({ origin: origin(req), next: safeNext(req.query.next) });
+      res.append('Set-Cookie', flowCookie(req, sealed({ ...flow, exp: Date.now() + FLOW_MS }), Math.ceil(FLOW_MS / 1000)));
+      return res.redirect(303, url);
+    } catch (err) {
+      console.error('[auth] SSO sign-in could not start:', err.message);
+      return page(502, { next: safeNext(req.query.next), message: `SSO is not available: ${err.message}`, bad: true });
+    }
+  }
+
+  async function ssoCallback(req, res, page) {
+    const flow = unseal(parseCookies(req.headers.cookie)[FLOW_COOKIE]);
+    res.append('Set-Cookie', flowCookie(req, '', 0));
+    const nextUrl = flow ? safeNext(flow.next) : '/';
+    const q = req.query;
+    if (q.error) {
+      const why = String(q.error_description || q.error).split(/\r?\n/)[0].slice(0, 300);
+      return page(401, { next: nextUrl, message: `The SSO sign-in was not completed: ${why}`, bad: true });
+    }
+    if (!flow || !(flow.exp > Date.now()) || !q.state || !safeEqual(flow.state, String(q.state))) {
+      return page(400, { next: nextUrl, message: 'The SSO sign-in could not be verified or took too long. Try again.', bad: true });
+    }
+    let who;
+    try {
+      who = await sso.finish({ code: String(q.code || ''), flow, iss: q.iss === undefined ? undefined : String(q.iss) });
+    } catch (err) {
+      console.error('[auth] SSO sign-in failed:', err.message);
+      return page(502, { next: nextUrl, message: `The SSO sign-in failed: ${err.message}`, bad: true });
+    }
+    if (!sso.allowed(who.user)) {
+      console.warn(`[auth] SSO user ${who.user} is not allowed (SSO_ALLOWED_DOMAINS / SSO_ALLOWED_USERS)`);
+      return page(403, { next: nextUrl, message: `${who.user} is not allowed to use this app. Ask the app owner to add you.`, bad: true });
+    }
+    const now = Date.now();
+    issue(res, req, { u: who.user, k: 'sso', iat: now, seen: now });
+    console.log(`[auth] ${who.user} signed in with SSO from ${req.ip}`);
+    return res.redirect(303, nextUrl);
+  }
+
   return async (req, res, next) => {
-    const page = (status, opts) => res.status(status).type('html').set('Cache-Control', 'no-store').send(loginPage(opts));
+    const page = (status, opts) => res.status(status).type('html').set('Cache-Control', 'no-store').send(loginPage({ ...opts, sso }));
+
+    if (sso && req.path === SSO_START && req.method === 'GET') return ssoStart(req, res, page);
+    if (sso && req.path === SSO_CALLBACK && req.method === 'GET') return ssoCallback(req, res, page);
 
     if (req.path === '/login' && req.method === 'GET') {
       if (session(req)) return res.redirect(303, safeNext(req.query.next));
@@ -169,6 +238,7 @@ function requireLogin({ users = [], disabled = false, sessionSecret = '', idleMi
       let form;
       try { form = await readForm(req); } catch { return page(400, { next: '/', message: 'The sign-in form could not be read.', bad: true }); }
       const nextUrl = safeNext(form.get('next'));
+      if (sso && sso.only) return page(403, { next: nextUrl, message: 'Sign in with SSO.', bad: true });
       if (tooMany(req.ip)) return page(429, { next: nextUrl, message: 'Too many failed sign-ins. Wait 15 minutes and try again.', bad: true });
       const user = (form.get('user') || '').trim();
       const u = checkUser(users, user, form.get('password') || '');
@@ -199,7 +269,7 @@ function requireLogin({ users = [], disabled = false, sessionSecret = '', idleMi
       if (Date.now() - s.seen > 60 * 1000) issue(res, req, { ...s, seen: Date.now() });
       return next();
     }
-    const b = basic(req);
+    const b = sso && sso.only ? null : basic(req);
     if (b) { req.user = b.user; return next(); }
 
     if (parseCookies(req.headers.cookie)[COOKIE]) clear(res, req);

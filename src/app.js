@@ -5,6 +5,7 @@ const path = require('path');
 const express = require('express');
 const { apiRouter } = require('./routes/api');
 const { requireLogin } = require('./middleware/auth');
+const { createSso } = require('./sso');
 const { errorHandler } = require('./middleware/errors');
 const { cpiConfigured } = require('./config');
 const { createClient } = require('./cpi/client');
@@ -84,7 +85,7 @@ function createApp({ pool, config, certificates, runtime, tickets, kanban }) {
   });
 
   // Everything below needs a signed-in user (login page, session cookie; Basic credentials for scripts).
-  app.use(requireLogin(config.auth));
+  app.use(requireLogin({ ...config.auth, ssoClient: createSso(config.auth.sso) }));
   app.use(express.json({ limit: '100kb' }));
   app.use('/api', apiRouter({ pool, config, certificates, runtime, tickets, kanban }));
   // The Kanban app sends the browser back here after the sign-in ("Connect Kanban board").

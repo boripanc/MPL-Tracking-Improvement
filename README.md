@@ -68,6 +68,63 @@ Ten wrong passwords from one address block the login for 15 minutes. Scripts can
 (`curl -u user:password …`) with each request; the browser is never asked for them, because a browser keeps Basic
 credentials until it is closed and cannot sign out.
 
+### Single sign-on (SSO)
+
+With SSO set up, the login page shows **Sign in with SSO** (the text comes from `SSO_LABEL`). People sign in with
+their company account and come back to the page they asked for. Any OpenID Connect provider works: Microsoft Entra
+ID (Office 365), Google Workspace, Okta, Keycloak, SAP Cloud Identity Services. The app checks the ID token's
+signature, issuer, audience, expiry and nonce, and uses PKCE. The user name in the app is the person's email.
+
+**Own SSO at sso.teddybiere.info** (OpenID Connect, code flow with PKCE)
+
+1. In the SSO server, add a client for this app: grant type `authorization_code`, response type `code`,
+   token auth method `client_secret_basic` (or `client_secret_post`), redirect URI
+   `https://<this app's address>/login/sso/callback`.
+2. Set:
+
+```bash
+SSO_ISSUER=https://sso.teddybiere.info
+SSO_CLIENT_ID=<client id>
+SSO_CLIENT_SECRET=<client secret>
+SSO_LABEL=Sign in with Teddybiere SSO
+SSO_ALLOWED_USERS=<emails allowed in>      # or SSO_ALLOWED_DOMAINS=<email domain>
+SESSION_SECRET=<openssl rand -hex 32>
+```
+
+The ID token of this server does not carry the email in the code flow, so the app reads it from `/me` (userinfo)
+and checks it belongs to the same user. The server sends `iss` with the answer; the app checks it too.
+
+**Microsoft Entra ID**
+
+1. Azure portal → **Microsoft Entra ID → App registrations → New registration**. Name: *CPI Error Center*;
+   supported accounts: *this organizational directory only*.
+2. Redirect URI, platform **Web**: `https://<this app's address>/login/sso/callback`. Microsoft takes plain `http`
+   only for `localhost`, so serve the app over https (or put it behind an https reverse proxy with `TRUST_PROXY=1`).
+3. **Certificates & secrets → New client secret**; copy the *value*.
+4. Copy the *Application (client) ID* and the *Directory (tenant) ID* from **Overview**.
+5. Set:
+
+```bash
+SSO_ISSUER=https://login.microsoftonline.com/<directory (tenant) id>/v2.0
+SSO_CLIENT_ID=<application (client) id>
+SSO_CLIENT_SECRET=<client secret value>
+SSO_ALLOWED_DOMAINS=thaiunion.com
+SSO_LABEL=Sign in with Microsoft
+SESSION_SECRET=<openssl rand -hex 32>
+```
+
+To allow only some people, either list them in `SSO_ALLOWED_USERS`, or in Entra set the app's **Enterprise
+application → Properties → Assignment required = Yes** and add users or groups under **Users and groups**.
+
+**Google Workspace**: `SSO_ISSUER=https://accounts.google.com`, a *Web application* OAuth client with the same
+redirect URI, and `SSO_ALLOWED_DOMAINS=<your domain>` (Google signs in any Google account otherwise).
+
+Who may sign in: `SSO_ALLOWED_DOMAINS` and `SSO_ALLOWED_USERS` (either one matching is enough). Both empty = everyone
+the provider signs in. The check runs again on every request, so removing a domain or a person ends their session.
+
+`SSO_ONLY=true` hides the user/password form and turns off `APP_USERS` (also for scripts). Without it, `APP_USERS`
+keeps working next to SSO as a backup. **Sign out** ends the session in this app only, not at Microsoft or Google.
+
 ### Try it locally with sample data
 
 With Docker:
@@ -96,16 +153,26 @@ All settings are environment variables (a `.env` file is read automatically). Se
 | `PGSSL` | (off) | `require` = TLS with certificate check, `no-verify` = TLS without check. |
 | `DB_SCHEMA` | `public` | Schema that holds the tables. |
 | `PG_POOL_MAX` | `10` | Max database connections. |
-| `APP_USERS` | – | **Required** unless auth is disabled. Comma-separated `user:password` pairs. |
+| `APP_USERS` | – | **Required** unless SSO is set up or auth is disabled. Comma-separated `user:password` pairs. |
 | `AUTH_DISABLED` | `false` | Local development only: no login at all. Only accepted with `HOST=127.0.0.1`; on any other address the server refuses to start. |
 | `SESSION_SECRET` | (random per start) | Key that signs the session cookie. Set it so a restart does not sign everyone out. |
 | `SESSION_IDLE_MINUTES` | `60` | Sign out after this long without activity. |
 | `SESSION_MAX_HOURS` | `12` | Sign in again after this long in any case. |
+| `SSO_ISSUER` | (off) | OpenID Connect issuer, e.g. `https://login.microsoftonline.com/<tenant id>/v2.0`. With `SSO_CLIENT_ID` turns SSO on. |
+| `SSO_CLIENT_ID` / `SSO_CLIENT_SECRET` | – | The app registration at the provider. |
+| `SSO_REDIRECT_URL` | (from the request) | `https://<this app>/login/sso/callback`, if the address the browser uses differs. |
+| `SSO_ALLOWED_DOMAINS` | (everyone) | Comma-separated email domains allowed to sign in, e.g. `thaiunion.com`. |
+| `SSO_ALLOWED_USERS` | – | Comma-separated emails allowed to sign in (in addition to the domains). |
+| `SSO_LABEL` | `Sign in with SSO` | Text of the SSO button. |
+| `SSO_ONLY` | `false` | `true` = SSO only, no passwords (`APP_USERS` is ignored). |
+| `SSO_SCOPES` | `openid profile email` | Scopes to ask for. |
+| `SSO_USER_CLAIM` | (email) | ID token claim used as the user name; default email, then `preferred_username`, then `upn`. |
+| `SSO_PROMPT` / `SSO_DOMAIN_HINT` | – | Passed to the provider, e.g. `select_account` / `thaiunion.com`. |
 | `PORT` / `HOST` | `3000` / `0.0.0.0` | Where the server listens. |
 | `TRUST_PROXY` | (off) | Set to `1` behind a reverse proxy / load balancer. |
 | `DEFAULT_TZ` | `Asia/Bangkok` | Time zone for chart buckets if the browser doesn't send one. |
 
-The server will not start without `DATABASE_URL`, or without `APP_USERS` unless `AUTH_DISABLED=true` on `HOST=127.0.0.1`.
+The server will not start without `DATABASE_URL`, or without `APP_USERS` or SSO unless `AUTH_DISABLED=true` on `HOST=127.0.0.1`.
 
 ## Certificate expiry
 
