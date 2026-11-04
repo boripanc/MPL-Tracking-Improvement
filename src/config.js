@@ -122,6 +122,8 @@ function loadConfig(env = process.env) {
       syncIntervalMinutes: Math.max(5, int(env.RUNTIME_SYNC_INTERVAL_MINUTES, 15)),
       // The pages warn when the last sync (by n8n or the app) is older than this.
       staleMinutes: Math.max(5, int(env.RUNTIME_STALE_MINUTES, 60)),
+      // A design-time lock held at least this long is flagged (someone probably forgot to unlock the artifact).
+      lockWarnHours: Math.max(1, int(env.LOCK_WARN_HOURS, 24)),
     },
     tickets: {
       // Freshservice tickets table filled by the n8n workflow "FreshServices Tickets" (Ticket pulse menu).

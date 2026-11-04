@@ -7,16 +7,15 @@ const { setupDatabase, startApp } = require('./helpers');
 const SQL = require('../src/sql');
 const { queueState, key } = require('../src/cpi/runtime');
 
-const hex = (s) => Buffer.from(s).toString('hex');
 const MIN = 60000;
 
 // Field names and formats as returned by the real tenant (numbers as strings, times in epoch milliseconds).
-function lock(entry, { component = '(S)FTP', source = 'user@sftp.example.com', ageMin = 10, ttlMin = 120 } = {}) {
-  const now = Date.now();
+// IntegrationDesigntimeLocks record as documented in the tenant's $metadata (CreatedAt is Edm.DateTime).
+function lock(name, { type = 'IFlow', pkg = 'TUIP Interfaces', by = 'alice@example.com', ageMin = 10 } = {}) {
   return {
-    __metadata: { type: 'com.sap.hci.api.Lock' },
-    Component: component, HexSource: hex(source), HexEntry: hex(entry), Source: source, Entry: entry, LockName: null,
-    CreationTime: String(now - ageMin * MIN), ExpirationTime: String(now - ageMin * MIN + ttlMin * MIN),
+    __metadata: { type: 'com.sap.hci.api.IntegrationDesigntimeLock' },
+    ResourceId: 'res-' + name, ArtifactId: name, ArtifactName: name.replace(/_/g, ' '), ArtifactType: type,
+    PackageId: pkg.replace(/ /g, ''), PackageName: pkg, CreatedAt: `/Date(${Date.now() - ageMin * MIN})/`, CreatedBy: by,
   };
 }
 
@@ -51,7 +50,7 @@ function fakeCpi(state) {
     if (req.headers.authorization !== 'Bearer tok') { res.statusCode = 401; return res.end(); }
     const p = decodeURIComponent(url.pathname.replace('/api/v1', ''));
     seen.push(p);
-    if (p === '/Locks') return state.locksFail ? send({ error: 'x' }, 500) : send({ d: { results: state.locks } });
+    if (p === '/IntegrationDesigntimeLocks') return state.locksFail ? send({ error: 'x' }, 500) : send({ d: { results: state.locks } });
     if (p === "/JmsBrokers('Broker1')") return send({ d: BROKER });
     if (p === '/Queues') return send({ d: { results: state.queues } });
     let m = /^\/Queues\('(.+)'\)\/(Artifacts|Messages)$/.exec(p);
@@ -87,7 +86,7 @@ test('queueState and key', () => {
 
 test('pages say the tables are missing before the first sync', async () => {
   const empty = await setupDatabase({ seed: false });
-  await empty.pool.query('DROP TABLE cpi_locks, cpi_jms_queues, cpi_jms_messages, cpi_runtime_sync');
+  await empty.pool.query('DROP TABLE cpi_designtime_locks, cpi_jms_queues, cpi_jms_messages, cpi_runtime_sync');
   const app = await startApp(empty.pool);
   try {
     const r = await app.call('GET', '/api/locks');
@@ -106,7 +105,7 @@ test('the n8n statements store locks, queues and messages; released locks and em
   const run = async (payload) => (await db.pool.query(SQL.syncRuntime, [JSON.stringify(payload)])).rows[0];
   let r = await run({
     source: 'n8n',
-    locks: [lock('in/a.csv'), lock('in/b.csv', { ageMin: 300 }), lock('agg-1', { component: 'Aggregator', source: 'AGG' })],
+    locks: [lock('IF_A'), lock('IF_B', { ageMin: 26 * 60, by: 'bob@example.com' }), lock('VM_1', { type: 'ValueMapping' })],
     broker: BROKER,
     queues: [{ ...queue('Q1', 2), Artifacts: [{ name: 'IF_A', id: '1', direction: '2' }] }, queue('Q2'), queue('Q3', 0, { State: '2' })],
   });
@@ -122,11 +121,16 @@ test('the n8n statements store locks, queues and messages; released locks and em
     let locks = (await app.call('GET', '/api/locks')).body;
     assert.equal(locks.enabled, true);
     assert.equal(locks.lastSync.source, 'n8n');
-    assert.equal(locks.summary.active, 2);
-    assert.equal(locks.summary.expired, 1, 'the lock created 5 hours ago with a 2 hour lifetime is past its expiry');
-    assert.deepEqual(locks.summary.components, { '(S)FTP': 2, Aggregator: 1 });
-    const a = locks.items.find((l) => l.entry === 'in/a.csv');
-    assert.equal(a.source, 'user@sftp.example.com');
+    assert.equal(locks.warnHours, 24);
+    assert.equal(locks.summary.locked, 2);
+    assert.equal(locks.summary.old, 1, 'the artifact locked 26 hours ago is flagged');
+    assert.deepEqual(locks.summary.types, { IFlow: 2, ValueMapping: 1 });
+    assert.deepEqual(locks.summary.people, { 'alice@example.com': 2, 'bob@example.com': 1 });
+    const a = locks.items.find((l) => l.artifactId === 'IF_A');
+    assert.equal(a.artifactName, 'IF A');
+    assert.equal(a.packageName, 'TUIP Interfaces');
+    assert.equal(a.lockedBy, 'alice@example.com');
+    assert.equal(a.state, 'locked');
     assert.ok(a.ageMinutes >= 9 && a.ageMinutes <= 11);
 
     let qs = (await app.call('GET', '/api/queues')).body;
@@ -149,7 +153,7 @@ test('the n8n statements store locks, queues and messages; released locks and em
     assert.equal((await app.call('GET', '/api/queues/NOPE')).status, 404);
 
     // Next run: one lock gone, Q1 emptied, Q2 removed. CPI not answering for locks would leave them alone.
-    await run({ source: 'n8n', locks: [lock('in/a.csv')], queues: [queue('Q1'), queue('Q3')] });
+    await run({ source: 'n8n', locks: [lock('IF_A')], queues: [queue('Q1'), queue('Q3')] });
     locks = (await app.call('GET', '/api/locks')).body;
     assert.equal(locks.items.length, 1);
     locks = (await app.call('GET', '/api/locks?released=7')).body;
@@ -171,7 +175,7 @@ test('the n8n statements store locks, queues and messages; released locks and em
 test('the app syncs locks, queues and messages from CPI itself when it has a CPI connection', async () => {
   const fresh = await setupDatabase({ seed: false });
   const state = {
-    locks: [lock('x/1.edi'), lock('x/2.edi')],
+    locks: [lock('IF_X'), lock('IF_Y')],
     queues: [queue("Q'ONE", 1), queue('Q_TWO')],
     messages: { "Q'ONE": [jmsMessage('mx', { failed: true })] },
   };
@@ -195,7 +199,7 @@ test('the app syncs locks, queues and messages from CPI itself when it has a CPI
     state.queues = [queue('Q_TWO')];
     const s2 = await app.call('POST', '/api/runtime/sync');
     assert.equal(s2.status, 200);
-    assert.match(s2.body.errors[0], /^locks: CPI locks request failed: HTTP 500/);
+    assert.match(s2.body.errors[0], /^locks: CPI design-time locks request failed: HTTP 500/);
     assert.equal((await app.call('GET', '/api/locks')).body.items.length, 2);
     assert.equal((await app.call('GET', '/api/queues')).body.items.length, 1);
   } finally {
