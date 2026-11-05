@@ -49,13 +49,13 @@ function fail(e) { toast((e && e.message) || String(e), true); }
 function show(tab) {
   S.tab = tab;
   $$('#tabs button').forEach(function (b) { b.classList.toggle('on', b.dataset.t === tab); });
-  ['dash', 'errors', 'known', 'cats', 'tickets', 'certs', 'locks', 'queues'].forEach(function (t) { $('#v-' + t).hidden = t !== tab; });
+  ['dash', 'errors', 'known', 'cats', 'tickets', 'certs', 'pgp', 'locks', 'queues'].forEach(function (t) { $('#v-' + t).hidden = t !== tab; });
   syncRangeVisibility();
   window.scrollTo(0, 0);
   return load();
 }
 function load() {
-  var loaders = { dash: loadDash, errors: loadErrors, known: loadKnown, cats: loadCats, tickets: loadTickets, certs: loadCerts, locks: loadLocks, queues: loadQueues };
+  var loaders = { dash: loadDash, errors: loadErrors, known: loadKnown, cats: loadCats, tickets: loadTickets, certs: loadCerts, pgp: loadPgp, locks: loadLocks, queues: loadQueues };
   if (!loaders[S.tab]) return show('dash'); // unknown menu: fall back to the dashboard instead of failing
   return loaders[S.tab]().catch(fail);
 }
@@ -70,7 +70,8 @@ function loadMeta() {
       // Fill the menu badge in the background (from the database); problems are shown on the Certificates screen.
       get('api/certificates').then(function (d) { if (d.enabled) { S.cache.certs = d; setCertBadge(d.summary); } }).catch(function () {});
     }
-    // Lock and queue badges, from the database.
+    // PGP, lock and queue badges, from the database.
+    if (S.tab !== 'pgp') get('api/pgp-keys').then(function (d) { if (d.enabled) setPgpBadge(d.summary); }).catch(function () {});
     if (S.tab !== 'locks') get('api/locks').then(function (d) { setRuntimeBadges('locks', d); }).catch(function () {});
     if (S.tab !== 'queues') get('api/queues').then(function (d) { setRuntimeBadges('queues', d); }).catch(function () {});
     if (S.tab !== 'tickets') get('api/tickets/pulse', rangeParams()).then(setTicketBadge).catch(function () {});
@@ -79,6 +80,7 @@ function loadMeta() {
 function refreshAll() {
   S.cache.known = null;
   if (S.tab === 'certs') return loadCerts().catch(fail);
+  if (S.tab === 'pgp') return loadPgp().catch(fail);
   if (S.tab === 'locks') return loadLocks().catch(fail);
   if (S.tab === 'queues') return loadQueues().catch(fail);
   return loadMeta().then(load).catch(fail);
@@ -707,6 +709,138 @@ function exportCertCsv() {
   toast('Exported ' + rows.length + ' certificates');
 }
 
+/* ---------- PGP keys (CPI PGP keyrings, from the database) ---------- */
+var PGP_STATES = { expired: 'Expired', critical: 'Expires soon', warning: 'Expiring', ok: 'Valid', never: 'No expiry' };
+var PGP_PILL = { expired: 'cert-expired', critical: 'cert-critical', warning: 'cert-warning', ok: 'cert-ok', never: 'cert-unknown' };
+S.pf = { state: '', ring: '', q: '', removed: false };
+
+function pgpPill(k) {
+  if (k.removedAt) return '<span class="pill">Removed</span>';
+  return '<span class="pill ' + PGP_PILL[k.state] + '">' + esc(PGP_STATES[k.state] || k.state) + '</span>';
+}
+function setPgpBadge(sum) { setBadge('#pgp-badge', sum ? sum.expired + sum.critical : 0); }
+function keyIdText(id) { return String(id || '').replace(/(.{4})(?=.)/g, '$1 '); }
+function loadPgp() {
+  var v = $('#v-pgp');
+  if (!$('#pg-tab', v)) {
+    v.innerHTML = '<div class="grid kpis" id="pg-kpis"></div>' +
+      '<div class="filters mt"><select id="pf-state" aria-label="Status"></select><select id="pf-ring" aria-label="Keyring"></select>' +
+      '<input id="pf-q" type="search" placeholder="Search owner, e-mail, key ID or fingerprint" style="min-width:240px;flex:1">' +
+      '<label class="check"><input type="checkbox" id="pf-removed"> Show removed</label>' +
+      '<button class="btn" id="pf-csv">Export CSV</button><button class="btn" id="pf-sync" hidden>Sync from CPI now</button></div>' +
+      '<div id="pg-sync"></div>' +
+      '<div class="card"><div class="row" style="margin-bottom:8px"><b id="pg-count"></b><span class="sp"></span><span class="muted small" id="pg-fetched"></span></div><div class="scroll" id="pg-tab"></div></div>' +
+      '<div class="card mt" id="pg-rings" hidden></div>' +
+      '<p class="muted small" id="pg-note"></p>';
+    $('#pf-state').onchange = function () { S.pf.state = this.value; renderPgp(); };
+    $('#pf-ring').onchange = function () { S.pf.ring = this.value; renderPgp(); };
+    $('#pf-q').oninput = function () { S.pf.q = this.value.trim().toLowerCase(); renderPgp(); };
+    $('#pf-removed').onchange = function () { S.pf.removed = this.checked; loadPgp().catch(fail); };
+    $('#pf-csv').onclick = function () { downloadCsv('cpi-pgp-keys.csv', ['state', 'keyType', 'keyId', 'name', 'email', 'algorithm', 'keyLength', 'fingerprint', 'createdAt', 'validUntil', 'daysLeft', 'cpiState', 'userIds'], S.cache.pgpRows || []); };
+    $('#pf-sync').onclick = syncPgp;
+  }
+  $('#pg-tab').innerHTML = '<div class="empty">Loading…</div>';
+  return get('api/pgp-keys', S.pf.removed ? { removed: 1 } : {}).then(function (d) {
+    if (!d.enabled) { v.innerHTML = '<div class="card"><h2>PGP keys are not available yet</h2><p class="muted">' + esc(d.reason) + '</p></div>'; return; }
+    S.cache.pgp = d;
+    setPgpBadge(d.summary);
+    renderPgp();
+  }, function (e) { $('#pg-tab').innerHTML = '<div class="empty bad">' + esc(e.message) + '</div>'; });
+}
+function syncPgp() {
+  var b = $('#pf-sync');
+  b.disabled = true;
+  b.textContent = 'Syncing…';
+  request('POST', 'api/pgp-keys/sync').then(function (r) {
+    toast('Synced ' + r.keys + ' PGP keys from CPI' + (r.removed ? ', ' + r.removed + ' removed' : ''));
+    return loadPgp();
+  }).catch(fail).then(function () { b.disabled = false; b.textContent = 'Sync from CPI now'; });
+}
+function pgpMatches(k, f) {
+  if (f.state === 'attention' && ['expired', 'critical', 'warning'].indexOf(k.state) < 0) return false;
+  if (f.state && f.state !== 'attention' && k.state !== f.state) return false;
+  if (f.state && k.removedAt) return false;
+  if (f.ring && k.keyType !== f.ring) return false;
+  if (f.q && [k.primaryUserId, k.userIds.join(' '), k.keyId, k.fingerprint, k.subkeys.map(function (s) { return s.keyId; }).join(' ')].join(' ').toLowerCase().indexOf(f.q.replace(/\s+/g, ' ')) < 0
+    && k.fingerprint.toLowerCase().indexOf(f.q.replace(/\s+/g, '')) < 0) return false;
+  return true;
+}
+function renderPgp() {
+  var d = S.cache.pgp, f = S.pf, sum = d.summary;
+  $('#pg-kpis').innerHTML =
+    pickKpi('pf', 'expired', 'Expired', fmt(sum.expired), 'renew or remove now', sum.expired ? 'alert' : '') +
+    pickKpi('pf', 'critical', 'Expires within ' + d.criticalDays + ' days', fmt(sum.critical), 'ask the partner for a new key', sum.critical ? 'alert' : '') +
+    pickKpi('pf', 'warning', 'Expires within ' + d.warnDays + ' days', fmt(sum.warning), 'coming up', sum.warning ? 'warn' : '') +
+    pickKpi('pf', 'ok', 'Valid', fmt(sum.ok), 'more than ' + d.warnDays + ' days left', 'good') +
+    pickKpi('pf', 'never', 'No expiry', fmt(sum.never), 'key has no end date', '') +
+    pickKpi('pf', '', 'All keys', fmt(sum.total), fmt(sum.public) + ' public · ' + fmt(sum.secret) + ' secret', '');
+  kpiPick('#pg-kpis', 'pf', f.state, renderPgp);
+  $('#pf-state').innerHTML = opts([['', 'All statuses'], ['attention', 'Needs attention (expired or expiring)'], ['expired', 'Expired'], ['critical', 'Expires within ' + d.criticalDays + ' days'], ['warning', 'Expires within ' + d.warnDays + ' days'], ['ok', 'Valid'], ['never', 'No expiry']], f.state);
+  $('#pf-ring').innerHTML = opts([['', 'Both keyrings'], ['Public', 'Public keyring (partner keys)'], ['Secret', 'Secret keyring (our keys)']], f.ring);
+  $('#pf-removed').checked = f.removed;
+  $('#pf-sync').hidden = !d.canSync;
+  var ls = d.lastSync, wf = 'the n8n workflow "CPI PGP Keys → Postgres"';
+  $('#pg-fetched').textContent = ls ? 'Last synced from CPI ' + dt(ls.at) + ' (' + (ls.source || 'unknown') + ', ' + fmt(ls.keys) + ' keys)' : 'Never synced';
+  $('#pg-sync').innerHTML = !ls
+    ? '<div class="card mt" style="margin-bottom:12px"><b class="bad">No PGP key data yet.</b> <span class="muted">Run ' + esc(wf) + ' once' + (d.canSync ? ' or press "Sync from CPI now"' : '') + '.</span></div>'
+    : d.stale
+      ? '<div class="card" style="margin-bottom:12px"><b class="bad">This data may be out of date:</b> <span class="muted">the last sync was ' + esc(dt(ls.at)) + ', more than ' + d.staleHours + ' hours ago. Check that ' + esc(wf) + ' is active and succeeds.</span></div>'
+      : '';
+  var rings = d.keyrings || [];
+  $('#pg-rings').hidden = !rings.length;
+  $('#pg-rings').innerHTML = '<h2>Keyrings <small>as deployed in CPI</small></h2><table><thead><tr><th>Keyring</th><th>Status</th><th>Last changed</th><th>By</th></tr></thead><tbody>' +
+    rings.map(function (g) {
+      return '<tr><td><b>' + esc(g.name) + '</b> <span class="muted small">' + esc(g.type || '') + '</span></td><td>' + (g.status === 'DEPLOYED' ? pill('Deployed', 'Resolved') : pill(g.status || 'Unknown', 'Open')) +
+        (g.errors ? '<div class="small bad">' + esc(g.errors) + '</div>' : '') + '</td><td class="nowrap">' + esc(dtFull(g.lastModifiedTime)) + '</td><td class="small">' + esc(g.lastModifiedBy) + '</td></tr>';
+    }).join('') + '</tbody></table>';
+  $('#pg-note').textContent = 'PGP keys in the CPI PGP public keyring (partner keys used to encrypt or verify) and secret keyring (our own keys used to decrypt or sign). ' +
+    'A key stops working when its primary key or all of its encryption subkeys expire; the earlier date is shown. Expires soon = less than ' + d.criticalDays + ' days left; Expiring = less than ' + d.warnDays + ' days (CERT_CRITICAL_DAYS / CERT_WARN_DAYS). ' +
+    'This page only shows keys; import or remove keys in CPI. The data comes from the database, which ' + wf + ' fills.';
+  var rows = d.items.filter(function (k) { return pgpMatches(k, f); });
+  S.cache.pgpRows = rows;
+  $('#pg-count').textContent = fmt(rows.length) + ' of ' + fmt(d.items.length) + ' keys' + (sum.removed ? ' (' + fmt(sum.removed) + ' removed)' : '');
+  if (!rows.length) { $('#pg-tab').innerHTML = '<div class="empty">' + (d.items.length ? 'No PGP keys match these filters.' : 'There are no PGP keys in CPI.') + '</div>'; return; }
+  $('#pg-tab').innerHTML = '<table><thead><tr><th>Status</th><th>Owner (user ID)</th><th>Keyring</th><th>Key ID</th><th>Algorithm</th><th>Created</th><th>Valid until</th><th class="num">Days left</th></tr></thead><tbody>' +
+    rows.map(function (k, i) {
+      return '<tr class="click" data-i="' + i + '"><td>' + pgpPill(k) + '</td><td><b>' + esc(k.name || k.primaryUserId) + '</b>' + (k.email ? '<div class="muted small">' + esc(k.email) + '</div>' : '') + '</td>' +
+        '<td class="small">' + esc(k.keyType) + '</td><td class="mono nowrap">' + esc(keyIdText(k.keyId)) + '</td>' +
+        '<td class="small">' + esc([k.algorithm, k.keyLength].filter(Boolean).join(' · ')) + '</td><td class="nowrap">' + dateOnly(k.createdAt) + '</td>' +
+        '<td class="nowrap">' + (k.validUntil ? dateOnly(k.validUntil) + (k.limitedBy === 'subkey' ? ' <span class="muted small" title="An encryption subkey ends before the primary key">(subkey)</span>' : '') : '<span class="muted">Never</span>') + '</td>' +
+        '<td class="num nowrap' + (k.state === 'expired' || k.state === 'critical' ? ' bad' : '') + '">' + daysText(k) + '</td></tr>';
+    }).join('') + '</tbody></table>';
+  $$('#pg-tab tr[data-i]').forEach(function (t) { t.onclick = function () { openPgp(rows[+t.dataset.i]); }; });
+}
+function openPgp(k) {
+  var subs = k.subkeys.length
+    ? '<h3 style="margin-top:20px">Subkeys</h3><div class="scroll"><table><thead><tr><th>Key ID</th><th>Use</th><th>Algorithm</th><th>Created</th><th>Valid until</th><th>CPI status</th></tr></thead><tbody>' +
+      k.subkeys.map(function (s) {
+        return '<tr><td class="mono nowrap">' + esc(keyIdText(s.keyId)) + '</td><td class="small">' + esc(s.flags) + '</td><td class="small">' + esc([s.algorithm, s.keyLength].filter(Boolean).join(' · ')) + '</td>' +
+          '<td class="nowrap">' + dateOnly(s.createdAt) + '</td><td class="nowrap">' + (s.validUntil ? dateOnly(s.validUntil) : '<span class="muted">Never</span>') + '</td><td class="small">' + esc(s.cpiState) + '</td></tr>';
+      }).join('') + '</tbody></table></div>'
+    : '';
+  openDrawer(drawerHead('PGP key: ' + (k.name || k.keyId)) +
+    '<div class="row" style="margin-bottom:12px">' + pgpPill(k) + '<span class="muted">' + esc(daysText(k)) + '</span></div>' +
+    '<div class="kv">' +
+      kv('Primary user ID', '<b>' + esc(k.primaryUserId) + '</b>') +
+      (k.userIds.length > 1 ? kv('Other user IDs', k.userIds.filter(function (u) { return u !== k.primaryUserId; }).map(esc).join('<br>')) : '') +
+      kv('Keyring', esc(k.keyType === 'Secret' ? 'Secret keyring (our own key)' : k.keyType === 'Public' ? 'Public keyring (partner key)' : k.keyType)) +
+      kv('Key ID', '<span class="mono">' + esc(keyIdText(k.keyId)) + '</span>') +
+      kv('Fingerprint', '<span class="mono">' + esc(keyIdText(k.fingerprint)) + '</span>') +
+      kv('Algorithm', esc([k.algorithm, k.keyLength ? k.keyLength + ' bit' : ''].filter(Boolean).join(', '))) + kv('Use', esc(k.flags)) +
+      kv('Created', esc(dtFull(k.createdAt))) +
+      kv('Primary key valid until', k.primaryValidUntil ? esc(dtFull(k.primaryValidUntil)) : 'Never expires') +
+      kv('Key works until', k.validUntil ? '<b>' + esc(dtFull(k.validUntil)) + '</b>' + (k.limitedBy === 'subkey' ? ' <span class="muted">(the encryption subkey ends first)</span>' : '') : 'No end date') +
+      kv('CPI status', esc(k.cpiState)) + kv('CPI error', k.errorInformation ? '<span class="bad">' + esc(k.errorInformation) + '</span>' : '') +
+      kv('Last changed in CPI', esc(dtFull(k.modifiedOn))) +
+      kv('First seen', esc(dtFull(k.firstSeenAt))) + kv('Last seen in keyring', esc(dtFull(k.lastSeenAt))) +
+      (k.removedAt ? kv('Removed from keyring', '<b>' + esc(dtFull(k.removedAt)) + '</b>') : '') +
+    '</div>' + subs +
+    '<p class="muted small" style="margin-top:20px">' + (k.keyType === 'Secret'
+      ? 'This is one of our own keys: create a new key pair, send the new public key to the partners who use it, then add it to the secret keyring in CPI.'
+      : 'This is a partner key: ask the owner (' + esc(k.email || 'the partner') + ') for a renewed public key and add it to the public keyring in CPI.') +
+    ' Keys are managed in Integration Suite under Monitor → Integrations and APIs → Manage Security → PGP Keys. The change shows here after the next sync.</p>');
+}
+
 /* ---------- Locks and Message queues (CPI runtime, from the database) ---------- */
 var LOCK_STATES = { locked: 'Locked', old: 'Locked a long time', released: 'Unlocked' };
 var Q_STATES = { full: 'Full', critical: 'Nearly full', failed: 'Failed messages', inactive: 'Inactive', waiting: 'Messages waiting', ok: 'OK', removed: 'Removed' };
@@ -983,8 +1117,8 @@ function tkMonths() {
 function tkPicked() { return S.tp === 'month' && S.tkMonth ? S.tkMonth : ''; }
 function tkSpan() { return tkPicked() ? 'in ' + monthName(tkPicked()) : TP[S.tp].span; }
 function syncRangeVisibility() {
-  // Certificates, locks and queues do not depend on the period; Ticket pulse only uses it in the daily view.
-  $('#range').hidden = ['certs', 'locks', 'queues'].indexOf(S.tab) >= 0 || (S.tab === 'tickets' && S.tp !== 'day');
+  // Certificates, PGP keys, locks and queues do not depend on the period; Ticket pulse only uses it in the daily view.
+  $('#range').hidden = ['certs', 'pgp', 'locks', 'queues'].indexOf(S.tab) >= 0 || (S.tab === 'tickets' && S.tp !== 'day');
 }
 function setTicketView(tp) {
   S.tp = tp;

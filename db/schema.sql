@@ -204,3 +204,40 @@ CREATE TABLE IF NOT EXISTS cpi_runtime_sync (
   messages       bigint NOT NULL,
   broker         jsonb                 -- JmsBrokers('Broker1'): capacity and queue limits
 );
+
+-- ---------------------------------------------------------------------------------------------
+-- CPI PGP keys (PGP keys menu): the keys in the tenant's PGP public and secret keyrings
+-- (Monitor > Manage Security > PGP Keys, OData "PgpKeyEntries"). Filled by the n8n workflow
+-- "CPI PGP Keys → Postgres" or by this app's own sync; the web page only reads these tables.
+-- Key material is never stored, only the descriptive fields.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS cpi_pgp_keys (
+  key_id            text NOT NULL,          -- 16-hex-digit key ID of the primary key
+  key_type          text NOT NULL,          -- Public or Secret (which keyring it is in)
+  fingerprint       text,
+  algorithm         text,                   -- e.g. RSA (1), DSA (17)
+  key_length        integer,
+  key_flags         text,                   -- e.g. certify sign
+  primary_user_id   text,                   -- e.g. Partner name <owner@example.com>
+  user_ids          jsonb,                  -- all user IDs: ["..."]
+  subkeys           jsonb,                  -- [{ keyId, algorithm, keyLength, flags, state, createdAt, validUntil }]
+  created_at        timestamptz,
+  valid_until       timestamptz,            -- NULL = the primary key does not expire
+  cpi_state         text,                   -- CPI's own ValidityState: Valid, Critical, Expired, ...
+  modified_on       timestamptz,
+  error_information text,
+  raw               jsonb,                  -- CPI record without key material
+  first_seen_at     timestamptz NOT NULL DEFAULT now(),
+  last_seen_at      timestamptz NOT NULL DEFAULT now(),
+  removed_at        timestamptz,            -- set when the key is no longer in the keyring
+  PRIMARY KEY (key_id, key_type)
+);
+
+CREATE TABLE IF NOT EXISTS cpi_pgp_sync (
+  id        serial PRIMARY KEY,
+  synced_at timestamptz NOT NULL DEFAULT now(),
+  source    text,                           -- n8n or app
+  keys      integer NOT NULL,
+  removed   integer NOT NULL,
+  keyrings  jsonb                           -- [{ name, type, lastModifiedBy, lastModifiedTime, status, errors }]
+);

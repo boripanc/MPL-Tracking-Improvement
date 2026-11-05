@@ -278,6 +278,84 @@ SELECT json_build_object(
       ORDER BY valid_to NULLS LAST, alias) k)
 ) AS result`;
 
+/* ---------- PGP keys (CPI PGP keyrings stored in the database) ---------- */
+
+// $1 = { source, keys: [raw PgpKeyEntries records with UserIds and SubKeys expanded], keyrings: [raw PgpPublicKeyrings
+// and PgpSecretKeyrings records] }. Upserts all keys, marks keys that are no longer in a keyring as removed and writes
+// one row to cpi_pgp_sync. An empty key list changes nothing. The same statement is used by the n8n workflow
+// "CPI PGP Keys → Postgres".
+const syncPgpKeys = `WITH p AS (SELECT $1::jsonb AS j),
+src AS (
+  SELECT r FROM p, jsonb_array_elements(CASE WHEN jsonb_typeof(p.j->'keys') = 'array' THEN p.j->'keys' ELSE '[]'::jsonb END) AS r
+  WHERE COALESCE(r->>'KeyId', r->>'Id', '') <> ''),
+rows AS (
+  SELECT DISTINCT ON (key_id, key_type) * FROM (
+    SELECT upper(COALESCE(NULLIF(r->>'KeyId', ''), r->>'Id')) AS key_id, COALESCE(NULLIF(r->>'Type', ''), 'Unknown') AS key_type,
+           r->>'Fingerprint' AS fingerprint, r->>'Algorithm' AS algorithm,
+           CASE WHEN r->>'KeyLength' ~ '^[0-9]+$' THEN (r->>'KeyLength')::int END AS key_length,
+           r->>'KeyFlagsLabel' AS key_flags, r->>'PrimaryUserId' AS primary_user_id,
+           (SELECT COALESCE(jsonb_agg(u->>'UserId'), '[]'::jsonb) FROM jsonb_array_elements(
+              CASE WHEN jsonb_typeof(r->'UserIds'->'results') = 'array' THEN r->'UserIds'->'results' ELSE '[]'::jsonb END) u
+            WHERE COALESCE(u->>'UserId', '') <> '') AS user_ids,
+           (SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                'keyId', upper(COALESCE(NULLIF(k->>'KeyId', ''), k->>'Id')), 'algorithm', k->>'Algorithm',
+                'keyLength', CASE WHEN k->>'KeyLength' ~ '^[0-9]+$' THEN (k->>'KeyLength')::int END,
+                'flags', k->>'KeyFlagsLabel', 'state', k->>'ValidityState',
+                'createdAt', ${odataTs("k->>'CreatedTime'")}, 'validUntil', ${odataTs("k->>'ValidUntil'")})), '[]'::jsonb)
+            FROM jsonb_array_elements(
+              CASE WHEN jsonb_typeof(r->'SubKeys'->'results') = 'array' THEN r->'SubKeys'->'results' ELSE '[]'::jsonb END) k) AS subkeys,
+           ${odataTs("r->>'CreatedTime'")} AS created_at,
+           ${odataTs("r->>'ValidUntil'")} AS valid_until,
+           r->>'ValidityState' AS cpi_state,
+           ${odataTs("r->>'ModifiedOn'")} AS modified_on,
+           r->>'ErrorInformation' AS error_information,
+           r - '__metadata' - 'UserIds' - 'SubKeys' - 'PublicResource' - 'SecretResource' AS raw
+    FROM src) x),
+up AS (
+  INSERT INTO cpi_pgp_keys (key_id, key_type, fingerprint, algorithm, key_length, key_flags, primary_user_id, user_ids, subkeys,
+                            created_at, valid_until, cpi_state, modified_on, error_information, raw,
+                            first_seen_at, last_seen_at, removed_at)
+  SELECT key_id, key_type, fingerprint, algorithm, key_length, key_flags, primary_user_id, user_ids, subkeys,
+         created_at, valid_until, cpi_state, modified_on, error_information, raw, now(), now(), NULL
+  FROM rows
+  ON CONFLICT (key_id, key_type) DO UPDATE SET
+    fingerprint = EXCLUDED.fingerprint, algorithm = EXCLUDED.algorithm, key_length = EXCLUDED.key_length,
+    key_flags = EXCLUDED.key_flags, primary_user_id = EXCLUDED.primary_user_id, user_ids = EXCLUDED.user_ids,
+    subkeys = EXCLUDED.subkeys, created_at = EXCLUDED.created_at, valid_until = EXCLUDED.valid_until,
+    cpi_state = EXCLUDED.cpi_state, modified_on = EXCLUDED.modified_on, error_information = EXCLUDED.error_information,
+    raw = EXCLUDED.raw, last_seen_at = now(), removed_at = NULL
+  RETURNING key_id),
+gone AS (
+  UPDATE cpi_pgp_keys k SET removed_at = now()
+  WHERE k.removed_at IS NULL AND EXISTS (SELECT 1 FROM rows)
+    AND NOT EXISTS (SELECT 1 FROM rows WHERE rows.key_id = k.key_id AND rows.key_type = k.key_type)
+  RETURNING k.key_id),
+rings AS (
+  SELECT COALESCE(jsonb_agg(jsonb_build_object(
+      'name', g->>'Name',
+      'type', CASE WHEN g->'__metadata'->>'type' ILIKE '%Secret%' THEN 'Secret' WHEN g->'__metadata'->>'type' ILIKE '%Public%' THEN 'Public' ELSE g->>'Type' END,
+      'lastModifiedBy', g->>'LastModifiedBy', 'lastModifiedTime', ${odataTs("g->>'LastModifiedTime'")},
+      'status', g->>'AggregatedStatus', 'errors', NULLIF(g->>'AggregatedErrors', ''))), '[]'::jsonb) AS list
+  FROM p, jsonb_array_elements(CASE WHEN jsonb_typeof(p.j->'keyrings') = 'array' THEN p.j->'keyrings' ELSE '[]'::jsonb END) g),
+log AS (
+  INSERT INTO cpi_pgp_sync (source, keys, removed, keyrings)
+  SELECT COALESCE((SELECT j->>'source' FROM p), 'unknown'), (SELECT count(*) FROM up), (SELECT count(*) FROM gone), (SELECT list FROM rings)
+  WHERE EXISTS (SELECT 1 FROM rows)
+  RETURNING id, synced_at, source, keys, removed)
+SELECT (SELECT row_to_json(log) FROM log) AS result`;
+
+const readPgpKeys = `WITH p AS (SELECT $1::jsonb AS j)
+SELECT json_build_object(
+  'lastSync', (SELECT row_to_json(s) FROM (
+      SELECT synced_at, source, keys, removed, keyrings FROM cpi_pgp_sync ORDER BY synced_at DESC, id DESC LIMIT 1) s),
+  'items', (SELECT COALESCE(json_agg(k), '[]') FROM (
+      SELECT key_id, key_type, fingerprint, algorithm, key_length, key_flags, primary_user_id, user_ids, subkeys,
+             created_at, valid_until, cpi_state, modified_on, error_information, first_seen_at, last_seen_at, removed_at
+      FROM cpi_pgp_keys
+      WHERE removed_at IS NULL OR (SELECT (j->>'includeRemoved')::boolean FROM p)
+      ORDER BY valid_until NULLS LAST, primary_user_id) k)
+) AS result`;
+
 /* ---------- Design-time artifact locks and JMS message queues (stored in the database) ---------- */
 
 // Epoch milliseconds ("1793279156662"), OData "/Date(ms)/" or an ISO string; 0 and empty mean "none".
@@ -475,5 +553,6 @@ module.exports = {
   categories, saveCategory, deleteCategory, testMatch,
   upsertMpls, upsertErrorInformation,
   syncKeystore, readCertificates,
+  syncPgpKeys, readPgpKeys,
   syncRuntime, syncQueueMessages, readLocks, readQueues, readQueue,
 };

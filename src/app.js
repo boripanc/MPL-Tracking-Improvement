@@ -11,6 +11,7 @@ const { cpiConfigured } = require('./config');
 const { createClient } = require('./cpi/client');
 const { createCertificateStore } = require('./cpi/certificates');
 const { createRuntimeStore } = require('./cpi/runtime');
+const { createPgpStore } = require('./cpi/pgp');
 const { createTicketStore } = require('./tickets');
 const { createKanban, CALLBACK_PATH } = require('./kanban');
 
@@ -55,7 +56,7 @@ function securityHeaders(req, res, next) {
 }
 
 /** Creates the Express application. `pool` is a pg Pool, `config` comes from loadConfig(). */
-function createApp({ pool, config, certificates, runtime, tickets, kanban }) {
+function createApp({ pool, config, certificates, runtime, pgp, tickets, kanban }) {
   if (!tickets) tickets = createTicketStore({ pool, config });
   if (!kanban) kanban = createKanban(config.kanban, { pool });
   const app = express();
@@ -63,6 +64,15 @@ function createApp({ pool, config, certificates, runtime, tickets, kanban }) {
   if (!runtime) runtime = createRuntimeStore({ pool, client: cpiClient, staleMinutes: config.runtime.staleMinutes, lockWarnHours: config.runtime.lockWarnHours });
   if (!certificates) {
     certificates = createCertificateStore({
+      pool,
+      client: cpiClient,
+      thresholds: { criticalDays: config.certificates.criticalDays, warnDays: config.certificates.warnDays },
+      staleHours: config.certificates.staleHours,
+    });
+  }
+  if (!pgp) {
+    // Same expiry thresholds as the certificates (CERT_CRITICAL_DAYS / CERT_WARN_DAYS).
+    pgp = createPgpStore({
       pool,
       client: cpiClient,
       thresholds: { criticalDays: config.certificates.criticalDays, warnDays: config.certificates.warnDays },
@@ -87,7 +97,7 @@ function createApp({ pool, config, certificates, runtime, tickets, kanban }) {
   // Everything below needs a signed-in user (login page, session cookie; Basic credentials for scripts).
   app.use(requireLogin({ ...config.auth, ssoClient: createSso(config.auth.sso) }));
   app.use(express.json({ limit: '100kb' }));
-  app.use('/api', apiRouter({ pool, config, certificates, runtime, tickets, kanban }));
+  app.use('/api', apiRouter({ pool, config, certificates, runtime, pgp, tickets, kanban }));
   // The Kanban app sends the browser back here after the sign-in ("Connect Kanban board").
   app.get(CALLBACK_PATH, async (req, res) => {
     const back = (q) => res.redirect(303, '/?' + new URLSearchParams(q).toString());
@@ -109,6 +119,7 @@ function createApp({ pool, config, certificates, runtime, tickets, kanban }) {
   app.use(errorHandler);
   app.locals.certificates = certificates;
   app.locals.runtime = runtime;
+  app.locals.pgp = pgp;
   return app;
 }
 
