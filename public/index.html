@@ -10,19 +10,12 @@
 </head>
 <body>
 <header>
+ <div class="shell">
+  <span class="logo" aria-hidden="true">CPI</span>
   <h1>CPI Error Center</h1>
-  <nav id="tabs">
-    <button data-t="dash" class="on">Dashboard</button>
-    <button data-t="errors">Errors</button>
-    <button data-t="known">Known errors &amp; solutions</button>
-    <button data-t="cats">Categories</button>
-    <button data-t="tickets">Ticket pulse<span class="badge" id="tk-badge" title="Overdue tickets" hidden></span></button>
-    <button data-t="certs">Certificates<span class="badge" id="cert-badge" title="Expired or expiring soon" hidden></span></button>
-    <button data-t="pgp">PGP keys<span class="badge" id="pgp-badge" title="Expired or expiring soon" hidden></span></button>
-    <button data-t="locks">Locks<span class="badge" id="lock-badge" title="Artifacts locked for a long time" hidden></span></button>
-    <button data-t="queues">Message queues<span class="badge" id="queue-badge" title="Failed messages and full queues" hidden></span></button>
-  </nav>
+  <span class="sub">SAP Integration Suite monitoring</span>
   <div class="sp"></div>
+  <span class="muted small" id="polled"></span>
   <select id="range" aria-label="Period">
     <option value="24h">Last 24 hours</option>
     <option value="7d" selected>Last 7 days</option>
@@ -30,8 +23,21 @@
     <option value="90d">Last 90 days</option>
   </select>
   <button class="btn" id="refresh">Refresh</button>
-  <span class="muted small" id="polled"></span>
-  <form id="me" method="post" action="logout" class="row" hidden><span class="muted small" id="me-name"></span><button class="btn" type="submit">Sign out</button></form>
+  <form id="me" method="post" action="logout" class="row" hidden><span class="avatar" id="me-av" aria-hidden="true"></span><span class="small" id="me-name"></span><button class="btn lite" type="submit">Sign out</button></form>
+ </div>
+ <div class="tabbar">
+   <nav id="tabs">
+     <button data-t="dash" class="on">Dashboard</button>
+     <button data-t="errors">Errors</button>
+     <button data-t="known">Known errors &amp; solutions</button>
+     <button data-t="cats">Categories</button>
+     <button data-t="tickets">Ticket pulse<span class="badge" id="tk-badge" title="Overdue tickets" hidden></span></button>
+     <button data-t="certs">Certificates<span class="badge" id="cert-badge" title="Expired or expiring soon" hidden></span></button>
+     <button data-t="pgp">PGP keys<span class="badge" id="pgp-badge" title="Expired or expiring soon" hidden></span></button>
+     <button data-t="locks">Locks<span class="badge" id="lock-badge" title="Artifacts locked for a long time" hidden></span></button>
+     <button data-t="queues">Message queues<span class="badge" id="queue-badge" title="Failed messages and full queues" hidden></span></button>
+   </nav>
+ </div>
 </header>
 <main>
   <section id="v-dash"></section>
