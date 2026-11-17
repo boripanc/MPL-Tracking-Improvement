@@ -2,7 +2,7 @@
 
 /**
  * Login for the app. Every page and API call needs a signed-in user; only /healthz, the login page and its
- * stylesheet are open.
+ * stylesheet and fonts are open.
  *
  * - With SSO set up (SSO_ISSUER, SSO_CLIENT_ID; see src/sso.js) the login page shows "Sign in with SSO": people
  *   sign in with their company account, limited to SSO_ALLOWED_DOMAINS / SSO_ALLOWED_USERS. SSO_ONLY=true hides
@@ -21,7 +21,8 @@ const FLOW_COOKIE = 'cpi_sso'; // state, nonce and PKCE verifier while the perso
 const FLOW_MS = 10 * 60 * 1000;
 const SSO_START = '/login/sso';
 const SSO_CALLBACK = '/login/sso/callback';
-const PUBLIC_PATHS = new Set(['/login', '/logout', '/styles.css']);
+// The login page's stylesheet and its fonts are open too.
+const PUBLIC_PATHS = new Set(['/login', '/logout', '/styles.css', '/fonts/72-Regular.woff2', '/fonts/72-Semibold.woff2', '/fonts/72-Bold.woff2']);
 const MAX_FAILURES = 10; // per client address, within FAILURE_WINDOW_MS
 const FAILURE_WINDOW_MS = 15 * 60 * 1000;
 
@@ -67,19 +68,24 @@ function loginPage({ next, message, bad, sso }) {
 <title>Sign in · CPI Error Center</title>
 <link rel="stylesheet" href="/styles.css">
 <style>
-  .login{max-width:360px;margin:12vh auto;padding:0 16px}
-  .login form{display:grid;gap:12px}
-  .login label{display:grid;gap:4px}
+  body{min-height:100vh;background:linear-gradient(180deg,var(--info-bg) 0,var(--bg) 60vh)}
+  .login{max-width:400px;margin:12vh auto;padding:0 16px}
+  .login .card{padding:32px}
+  .login form{display:grid;gap:16px}
+  .login label{display:grid;gap:4px;color:var(--muted)}
   .login input{width:100%}
-  .login h1{margin-bottom:14px}
-  .login .sso{display:block;text-align:center;text-decoration:none}
-  .login .or{text-align:center;margin:14px 0 10px}
+  .login .brand{display:flex;align-items:center;gap:12px;margin-bottom:24px}
+  .login h1{margin:0;font-size:20px}
+  .login .brand .sub{color:var(--muted);font-size:14px}
+  .login .sso{display:flex;width:100%;text-decoration:none}
+  .login button[type=submit]{width:100%}
+  .login .or{text-align:center;margin:16px 0 12px}
 </style>
 </head>
 <body>
 <main class="login">
   <div class="card">
-    <h1>CPI Error Center</h1>
+    <div class="brand"><span class="logo" aria-hidden="true">CPI</span><div><h1>CPI Error Center</h1><div class="sub">SAP Integration Suite monitoring</div></div></div>
     ${message ? `<p class="small ${bad ? 'bad' : 'muted'}" role="alert">${esc(message)}</p>` : ''}
     ${ssoOn ? `<a class="btn pri sso" id="sso" href="${SSO_START}?next=${encodeURIComponent(next)}">${esc(sso.label || 'Sign in with SSO')}</a>` : ''}
     ${ssoOn && showForm ? '<p class="muted small or">or with a user and password</p>' : ''}

@@ -23,6 +23,8 @@ existing `errorscenario` view, so the app and the view always agree.
 | **Locks** | Design-time artifact locks in CPI (Monitor → Manage Design-Time Artifact Locks): iFlows, value mappings, script collections and other artifacts someone opened for editing, with package, who locked it, since when and for how long. Artifacts locked for `LOCK_WARN_HOURS` (24) or more are flagged and counted in the menu badge. Filter by type or person, search, show artifacts unlocked in the last 7 days, export CSV. Read-only: unlock artifacts in CPI. |
 | **Message queues** | JMS queues in CPI (Monitor → Manage Stores → Message Queues) with messages waiting, failed messages, oldest message, size, fill level, status (**Full**, **Nearly full**, **Failed messages**, **Inactive**, **Messages waiting**, **OK**) and the iFlows that use each queue, plus the tenant's JMS storage and queue limits. Open a queue to see its messages (retries, next retry, sender/receiver, link to the error when the message log is in the database). The menu badge counts failed messages and full queues. Read-only: retry or delete messages in CPI. |
 
+The app uses the SAP Fiori **Horizon** look (shell bar, tab bar, cards, tables and the SAP "72" font), light or dark following the browser setting. The colours come from SAP's `sap_horizon` / `sap_horizon_dark` theme values; the font files are in `public/fonts`.
+
 Both editors have a **Test against last 30 days** button that shows how many errors a pattern would match before you save it.
 
 ### Matching rules

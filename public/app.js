@@ -13,6 +13,7 @@ function dt(s) { return s ? new Date(s).toLocaleString(undefined, { month: 'shor
 function dtFull(s) { return s ? new Date(s).toLocaleString() : ''; }
 function short(s, n) { s = s || ''; return s.length > n ? s.slice(0, n) + '…' : s; }
 function pill(s, cls) { return '<span class="pill ' + esc(cls || String(s || 'none').replace(/ /g, '')) + '">' + esc(s || 'None') + '</span>'; }
+function initials(u) { var p = String(u || '').split('@')[0].split(/[._\s-]+/).filter(Boolean); return p.length > 1 ? p[0][0] + p[1][0] : (p[0] || '').slice(0, 2); }
 function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
 function blankFilter(o) { return Object.assign({ flow: '', status: '', category: '', analysis: '', q: '', offset: 0 }, o || {}); }
 function opts(list, sel) { return list.map(function (o) { return '<option value="' + esc(o[0]) + '"' + (String(o[0]) === String(sel) ? ' selected' : '') + '>' + esc(o[1]) + '</option>'; }).join(''); }
@@ -63,7 +64,7 @@ function loadMeta() {
   return get('api/meta').then(function (m) {
     S.meta = m;
     var me = $('#me');
-    if (me) { me.hidden = !m.user || m.authDisabled; $('#me-name').textContent = m.user || ''; }
+    if (me) { me.hidden = !m.user || m.authDisabled; $('#me-name').textContent = m.user || ''; $('#me-av').textContent = initials(m.user); }
     $('#polled').textContent = m.lastPolled ? 'Data polled ' + dt(m.lastPolled) : '';
     $('#tabs button[data-t="certs"]').hidden = false;
     if (!S.cache.certs) {
