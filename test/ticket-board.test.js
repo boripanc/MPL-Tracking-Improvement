@@ -55,20 +55,20 @@ function fakeWorkStream() {
     });
     s.tool('create_card', {
       boardId: z.string(), column: z.string(), title: z.string(), description: z.string().optional(),
-      labels: z.array(z.string()).optional(), priority: z.string().optional(), dueDate: z.string().nullable().optional(),
+      labels: z.array(z.string()).optional(), priority: z.string().optional(), dueDate: z.string().nullable().optional(), startDate: z.string().nullable().optional(),
       assignees: z.array(z.string()).optional(),
     }, async (a) => {
       log('create_card', a);
       const b = state.boards.find((x) => x.id === a.boardId);
       if (!b.columns.includes(a.column)) return err(`Column "${a.column}" not found`);
       const c = { id: id('c'), column: a.column, title: a.title, description: a.description || '', priority: a.priority || 'none',
-        dueDate: a.dueDate || null, labels: labelObjs(b, a.labels), assignees: (a.assignees || []).map((name) => ({ id: name, name })), pendingAssignment: null };
+        startDate: a.startDate || null, dueDate: a.dueDate || null, labels: labelObjs(b, a.labels), assignees: (a.assignees || []).map((name) => ({ id: name, name })), pendingAssignment: null };
       b.cards.push(c);
       return json(c);
     });
     s.tool('update_card', {
       cardId: z.string(), column: z.string().optional(), title: z.string().optional(), description: z.string().optional(),
-      labels: z.array(z.string()).optional(), priority: z.string().optional(), dueDate: z.string().nullable().optional(),
+      labels: z.array(z.string()).optional(), priority: z.string().optional(), dueDate: z.string().nullable().optional(), startDate: z.string().nullable().optional(),
       assignees: z.array(z.string()).optional(),
     }, async (a) => {
       log('update_card', a);
@@ -76,6 +76,7 @@ function fakeWorkStream() {
       if (!c) return err('Card not found');
       for (const k of ['column', 'title', 'description', 'priority']) if (a[k] !== undefined) c[k] = a[k];
       if (a.dueDate !== undefined) c.dueDate = a.dueDate || null;
+      if (a.startDate !== undefined) c.startDate = a.startDate || null;
       if (a.labels) c.labels = labelObjs(b, a.labels);
       if (a.assignees) c.assignees = a.assignees.map((name) => ({ id: name, name }));
       return json(c);
@@ -164,6 +165,8 @@ test('card mapping: column by status, overdue = high priority, id parsed back fr
   const closed = cardFor({ id: 'INC-9', subject: 'Down', status: 'Closed', closed: true, due_by: ago(1), created_at: ago(5), updated_at: ago(1) });
   assert.equal(closed.priority, 'none');
   assert.equal(closed.dueDate, null);
+  // Start date = the day the ticket was created (Bangkok time).
+  assert.equal(cardFor({ id: 'INC-9', status: 'Open', created_at: '2026-11-18T18:30:00Z' }).startDate, '2026-11-19');
 });
 
 test('plan: creates new, updates changed, removes gone and duplicate ticket cards, leaves hand-made cards', () => {
@@ -209,6 +212,7 @@ test('first sync creates the board with its columns and one card per ticket, fil
   assert.equal(b.cards.find((c) => c.title.startsWith('INC-1 ')).priority, 'high');
   const who = Object.fromEntries(b.cards.map((c) => [ticketIdOf(c), c.assignees.map((a) => a.name)]));
   assert.deepEqual(who, { 'INC-1': ['Ann'], 'SR-2': ['Bo'], 'INC-3': [], 'INC-4': ['Ann'] });
+  assert.ok(b.cards.every((c) => /^\d{4}-\d{2}-\d{2}$/.test(c.startDate)));
 });
 
 test('a second sync changes nothing; a status change moves the card; a hand-moved card is put back', async () => {
