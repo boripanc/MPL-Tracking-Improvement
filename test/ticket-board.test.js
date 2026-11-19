@@ -56,18 +56,20 @@ function fakeWorkStream() {
     s.tool('create_card', {
       boardId: z.string(), column: z.string(), title: z.string(), description: z.string().optional(),
       labels: z.array(z.string()).optional(), priority: z.string().optional(), dueDate: z.string().nullable().optional(),
+      assignees: z.array(z.string()).optional(),
     }, async (a) => {
       log('create_card', a);
       const b = state.boards.find((x) => x.id === a.boardId);
       if (!b.columns.includes(a.column)) return err(`Column "${a.column}" not found`);
       const c = { id: id('c'), column: a.column, title: a.title, description: a.description || '', priority: a.priority || 'none',
-        dueDate: a.dueDate || null, labels: labelObjs(b, a.labels) };
+        dueDate: a.dueDate || null, labels: labelObjs(b, a.labels), assignees: (a.assignees || []).map((name) => ({ id: name, name })), pendingAssignment: null };
       b.cards.push(c);
       return json(c);
     });
     s.tool('update_card', {
       cardId: z.string(), column: z.string().optional(), title: z.string().optional(), description: z.string().optional(),
       labels: z.array(z.string()).optional(), priority: z.string().optional(), dueDate: z.string().nullable().optional(),
+      assignees: z.array(z.string()).optional(),
     }, async (a) => {
       log('update_card', a);
       const { b, c } = findCard(a.cardId);
@@ -75,6 +77,7 @@ function fakeWorkStream() {
       for (const k of ['column', 'title', 'description', 'priority']) if (a[k] !== undefined) c[k] = a[k];
       if (a.dueDate !== undefined) c.dueDate = a.dueDate || null;
       if (a.labels) c.labels = labelObjs(b, a.labels);
+      if (a.assignees) c.assignees = a.assignees.map((name) => ({ id: name, name }));
       return json(c);
     });
     s.tool('delete_card', { cardId: z.string() }, async (a) => {
@@ -177,6 +180,21 @@ test('plan: creates new, updates changed, removes gone and duplicate ticket card
   assert.deepEqual(p.remove.map((c) => c.id).sort(), ['x3', 'x4']);
 });
 
+test('assignee = the ticket agent; a waiting request is not sent again', () => {
+  const t = { id: 'INC-1', subject: 'A', status: 'Open', responder: 'Ann', created_at: ago(1) };
+  const want = cardFor(t);
+  assert.deepEqual(want.assignees, ['Ann']);
+  assert.deepEqual(cardFor({ ...t, responder: null }).assignees, []);
+  const base = { id: 'x1', ...want, assignees: [] };
+  assert.deepEqual(plan([base], [t]).update, [{ cardId: 'x1', assignees: ['Ann'] }]);
+  assert.deepEqual(plan([{ ...base, assignees: [{ id: 'm1', name: 'Ann' }] }], [t]).update, []);
+  assert.deepEqual(plan([{ ...base, pendingAssignment: { assignees: [{ name: 'Ann' }] } }], [t]).update, []);
+  assert.deepEqual(plan([{ ...base, pendingAssignment: { requestedAt: 'x' } }], [t]).update, []);
+  assert.deepEqual(plan([{ ...base, pendingAssignment: { assignees: [{ name: 'Bo' }] } }], [t]).update, [{ cardId: 'x1', assignees: ['Ann'] }]);
+  // Responder removed in Freshservice: the card is unassigned again.
+  assert.deepEqual(plan([{ ...base, assignees: [{ id: 'm1', name: 'Ann' }] }], [{ ...t, responder: null }]).update[0].assignees, []);
+});
+
 test('first sync creates the board with its columns and one card per ticket, filters kept', async () => {
   assert.deepEqual((await api.call('GET', '/api/kanban/ticket-board')).body, { enabled: true, board: 'Ticket pulse', minutes: 15, running: false, last: null });
   const r = await api.call('POST', '/api/kanban/ticket-board/sync');
@@ -189,6 +207,8 @@ test('first sync creates the board with its columns and one card per ticket, fil
   const where = Object.fromEntries(b.cards.map((c) => [ticketIdOf(c), c.column]));
   assert.deepEqual(where, { 'INC-1': 'Open', 'SR-2': 'In Progress', 'INC-3': 'Pending', 'INC-4': 'Resolved / Closed' });
   assert.equal(b.cards.find((c) => c.title.startsWith('INC-1 ')).priority, 'high');
+  const who = Object.fromEntries(b.cards.map((c) => [ticketIdOf(c), c.assignees.map((a) => a.name)]));
+  assert.deepEqual(who, { 'INC-1': ['Ann'], 'SR-2': ['Bo'], 'INC-3': [], 'INC-4': ['Ann'] });
 });
 
 test('a second sync changes nothing; a status change moves the card; a hand-moved card is put back', async () => {
