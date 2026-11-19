@@ -7,7 +7,7 @@ const { z } = require('zod');
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 const { setupDatabase, startApp } = require('./helpers');
-const { cardFor, columnFor, plan, ticketIdOf, COLUMNS } = require('../src/ticket-board');
+const { cardFor, columnFor, plan, ticketIdOf, weekdays, COLUMNS } = require('../src/ticket-board');
 
 const TOKEN = 'test-key';
 const H = 3600 * 1000;
@@ -55,20 +55,20 @@ function fakeWorkStream() {
     });
     s.tool('create_card', {
       boardId: z.string(), column: z.string(), title: z.string(), description: z.string().optional(),
-      labels: z.array(z.string()).optional(), priority: z.string().optional(), dueDate: z.string().nullable().optional(), startDate: z.string().nullable().optional(),
+      labels: z.array(z.string()).optional(), priority: z.string().optional(), dueDate: z.string().nullable().optional(), startDate: z.string().nullable().optional(), estimateDays: z.number().nullable().optional(),
       assignees: z.array(z.string()).optional(),
     }, async (a) => {
       log('create_card', a);
       const b = state.boards.find((x) => x.id === a.boardId);
       if (!b.columns.includes(a.column)) return err(`Column "${a.column}" not found`);
       const c = { id: id('c'), column: a.column, title: a.title, description: a.description || '', priority: a.priority || 'none',
-        startDate: a.startDate || null, dueDate: a.dueDate || null, labels: labelObjs(b, a.labels), assignees: (a.assignees || []).map((name) => ({ id: name, name })), pendingAssignment: null };
+        estimateDays: a.estimateDays || null, startDate: a.startDate || null, dueDate: a.dueDate || null, labels: labelObjs(b, a.labels), assignees: (a.assignees || []).map((name) => ({ id: name, name })), pendingAssignment: null };
       b.cards.push(c);
       return json(c);
     });
     s.tool('update_card', {
       cardId: z.string(), column: z.string().optional(), title: z.string().optional(), description: z.string().optional(),
-      labels: z.array(z.string()).optional(), priority: z.string().optional(), dueDate: z.string().nullable().optional(), startDate: z.string().nullable().optional(),
+      labels: z.array(z.string()).optional(), priority: z.string().optional(), dueDate: z.string().nullable().optional(), startDate: z.string().nullable().optional(), estimateDays: z.number().nullable().optional(),
       assignees: z.array(z.string()).optional(),
     }, async (a) => {
       log('update_card', a);
@@ -77,6 +77,7 @@ function fakeWorkStream() {
       for (const k of ['column', 'title', 'description', 'priority']) if (a[k] !== undefined) c[k] = a[k];
       if (a.dueDate !== undefined) c.dueDate = a.dueDate || null;
       if (a.startDate !== undefined) c.startDate = a.startDate || null;
+      if (a.estimateDays !== undefined) c.estimateDays = a.estimateDays;
       if (a.labels) c.labels = labelObjs(b, a.labels);
       if (a.assignees) c.assignees = a.assignees.map((name) => ({ id: name, name }));
       return json(c);
@@ -164,9 +165,26 @@ test('card mapping: column by status, overdue = high priority, id parsed back fr
   assert.equal(ticketIdOf({ title: 'Team meeting' }), null);
   const closed = cardFor({ id: 'INC-9', subject: 'Down', status: 'Closed', closed: true, due_by: ago(1), created_at: ago(5), updated_at: ago(1) });
   assert.equal(closed.priority, 'none');
-  assert.equal(closed.dueDate, null);
+  assert.equal(closed.estimateDays >= 1, true);
+  assert.match(closed.dueDate, /^\d{4}-\d{2}-\d{2}$/);
   // Start date = the day the ticket was created (Bangkok time).
   assert.equal(cardFor({ id: 'INC-9', status: 'Open', created_at: '2026-11-18T18:30:00Z' }).startDate, '2026-11-19');
+});
+
+test('man-days for closed tickets: weekdays from created to closed, both counted', () => {
+  assert.equal(weekdays('2026-11-17', '2026-11-17'), 1); // Tue
+  assert.equal(weekdays('2026-11-13', '2026-11-17'), 3); // Fri .. Tue, weekend skipped
+  assert.equal(weekdays('2026-11-14', '2026-11-15'), 1); // Sat .. Sun: at least 1
+  const c = cardFor({ id: 'INC-9', status: 'Closed', closed: true, created_at: '2026-11-13T03:00:00Z', updated_at: '2026-11-17T09:00:00Z' });
+  assert.equal(c.startDate, '2026-11-13');
+  assert.equal(c.dueDate, '2026-11-17');
+  assert.equal(c.estimateDays, 3);
+  assert.match(c.description, /Man-days: 3/);
+  assert.equal(cardFor({ id: 'INC-9', status: 'Open', created_at: '2026-11-13T03:00:00Z' }).estimateDays, null);
+  // WorkStream may work out its own due date from the estimate: only the estimate is compared, so no endless updates.
+  assert.deepEqual(plan([{ id: 'x1', ...c, dueDate: '2026-11-18' }], [{ id: 'INC-9', status: 'Closed', closed: true, created_at: '2026-11-13T03:00:00Z', updated_at: '2026-11-17T09:00:00Z' }]).update, []);
+  assert.deepEqual(plan([{ id: 'x1', ...c, estimateDays: null }], [{ id: 'INC-9', status: 'Closed', closed: true, created_at: '2026-11-13T03:00:00Z', updated_at: '2026-11-17T09:00:00Z' }]).update,
+    [{ cardId: 'x1', estimateDays: 3, dueDate: '2026-11-17' }]);
 });
 
 test('plan: creates new, updates changed, removes gone and duplicate ticket cards, leaves hand-made cards', () => {
