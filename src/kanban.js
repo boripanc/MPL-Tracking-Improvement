@@ -286,6 +286,52 @@ function createKanban(cfg, { pool, env = process.env } = {}) {
     });
   }
 
+  /**
+   * Keeps the board titled `title` in step with `plan(cards)`, which returns { create, update, remove }. The board
+   * (with `columns`) is created when missing, and missing columns are added. One failing card does not stop the
+   * others; the count and the first errors come back in `failed` / `errors`.
+   */
+  async function syncBoard({ title, columns, plan }) {
+    return session(async (call) => {
+      const boards = await call('list_boards');
+      let b = (Array.isArray(boards) ? boards : []).find((x) => x.id === title || String(x.title).toLowerCase() === title.toLowerCase());
+      let createdBoard = false;
+      if (!b) {
+        b = await call('create_board', { title, columns });
+        createdBoard = true;
+      }
+      if (b.role === 'viewer') throw new KanbanError(`The Kanban account can only view board "${b.title}", so it cannot sync tickets to it.`);
+      let full = await call('get_board', { boardId: b.id });
+      const have = new Set((full.columns || []).map((c) => c.title.toLowerCase()));
+      const add = columns.filter((c) => !have.has(c.toLowerCase()));
+      for (const c of add) await call('add_column', { boardId: b.id, title: c });
+      if (add.length) full = await call('get_board', { boardId: b.id });
+      const cards = (full.columns || []).flatMap((c) => (c.cards || []).map((card) => ({ ...card, column: card.column || c.title })));
+      const todo = plan(cards);
+      const r = { board: { id: b.id, title: full.title || b.title }, createdBoard, created: 0, updated: 0, removed: 0, failed: 0, errors: [] };
+      const attempt = async (key, fn) => {
+        try {
+          await fn();
+          r[key] += 1;
+        } catch (err) {
+          if (!(err instanceof KanbanError) && refused(err)) throw err;
+          r.failed += 1;
+          if (r.errors.length < 5) r.errors.push(err.message);
+        }
+      };
+      for (const c of todo.remove) await attempt('removed', () => call('delete_card', { cardId: c.id }));
+      for (const u of todo.update) await attempt('updated', () => call('update_card', u));
+      for (const c of todo.create) {
+        const args = { boardId: b.id, column: c.column, title: c.title, description: c.description };
+        if (c.priority && c.priority !== 'none') args.priority = c.priority;
+        if (c.dueDate) args.dueDate = c.dueDate;
+        if (c.labels && c.labels.length) args.labels = c.labels;
+        await attempt('created', () => call('create_card', args));
+      }
+      return r;
+    });
+  }
+
   async function createCard(card) {
     return session(async (call) => {
       const args = { boardId: await boardId(call), column: card.column || cfg.column, title: card.title, description: card.description };
@@ -341,7 +387,7 @@ function createKanban(cfg, { pool, env = process.env } = {}) {
     return a.names[0] || '';
   }
 
-  return { enabled, useOAuth, status, connect, finish, disconnect, board, createCard, ensureKnownErrorCard };
+  return { enabled, useOAuth, status, connect, finish, disconnect, board, createCard, ensureKnownErrorCard, syncBoard };
 }
 
 /**

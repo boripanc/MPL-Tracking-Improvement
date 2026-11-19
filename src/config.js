@@ -188,6 +188,13 @@ function loadConfig(env = process.env) {
       // Optional link to a card in the Kanban app; {id} = card id.
       cardUrl: (env.KANBAN_CARD_URL || '').trim(),
       timeoutMs: Math.max(1000, int(env.KANBAN_TIMEOUT_MS, 20000)),
+      // Ticket pulse on WorkStream: board kept in step with the Freshservice tickets (one way). "off" = no sync.
+      ticketBoard: /^(off|none|false)$/i.test((env.KANBAN_TICKET_BOARD || '').trim()) ? ''
+        : (env.KANBAN_TICKET_BOARD || 'Ticket pulse').trim(),
+      ticketBoardMinutes: Math.max(1, int(env.KANBAN_TICKET_SYNC_MINUTES, 15)),
+      // Resolved / closed tickets stay on the board this many days after they were closed.
+      ticketBoardDoneDays: Math.max(0, int(env.KANBAN_TICKET_DONE_DAYS, 14)),
+      ticketBoardTz: (env.KANBAN_TICKET_TZ || 'Asia/Bangkok').trim(),
     },
     poller: {
       enabled: bool(env.CPI_POLL_ENABLED, false),

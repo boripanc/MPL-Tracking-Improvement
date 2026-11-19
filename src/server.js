@@ -49,6 +49,12 @@ const secSync = app.locals.securityMaterial.canSync
   ? startSecurityMaterialSync({ store: app.locals.securityMaterial, intervalMinutes: config.certificates.syncIntervalMinutes })
   : null;
 
+const ticketBoard = app.locals.ticketBoard;
+if (ticketBoard.enabled) {
+  ticketBoard.start();
+  console.log(`[ticket-board] Freshservice tickets are copied to the WorkStream board "${config.kanban.ticketBoard}" every ${config.kanban.ticketBoardMinutes} min (one way)`);
+}
+
 let stopping = false;
 async function shutdown(signal) {
   if (stopping) return;
@@ -59,6 +65,7 @@ async function shutdown(signal) {
   if (runtimeSync) runtimeSync.stop();
   if (pgpSync) pgpSync.stop();
   if (secSync) secSync.stop();
+  ticketBoard.stop();
   server.close(() => pool.end().finally(() => process.exit(0)));
   setTimeout(() => process.exit(1), 10000).unref();
 }
