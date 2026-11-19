@@ -100,7 +100,7 @@ async function kanbanCall(fn) {
 
 /* ---------- router ---------- */
 
-function apiRouter({ pool, config, certificates, runtime, pgp, securityMaterial, tickets, kanban }) {
+function apiRouter({ pool, config, certificates, runtime, pgp, securityMaterial, tickets, kanban, ticketBoard }) {
   const router = express.Router();
   const run = (sql, params) => queryResult(pool, sql, params);
   const handle = (fn) => (req, res, next) => {
@@ -169,6 +169,15 @@ function apiRouter({ pool, config, certificates, runtime, pgp, securityMaterial,
   };
 
   router.get('/kanban/status', handle(() => kanban.status()));
+
+  // Ticket pulse on WorkStream (one-way sync of the Freshservice tickets to a board).
+  router.get('/kanban/ticket-board', handle(() => (ticketBoard ? ticketBoard.status() : { enabled: false })));
+  router.post('/kanban/ticket-board/sync', handle(async (req) => {
+    if (!ticketBoard || !ticketBoard.enabled) throw new HttpError(409, 'The ticket board sync is off. Set KANBAN_MCP_URL (and leave KANBAN_TICKET_BOARD on).');
+    console.log(`[ticket-board] ${req.user || 'user'} started a sync`);
+    await ticketBoard.run();
+    return ticketBoard.status();
+  }));
 
   // Starts the OAuth sign-in; the browser opens the returned URL and comes back to /kanban/oauth/callback.
   // { force: true } = sign in again from scratch: the saved tokens are dropped and the login page is always shown.

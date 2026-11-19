@@ -15,6 +15,7 @@ const { createPgpStore } = require('./cpi/pgp');
 const { createSecurityMaterialStore } = require('./cpi/security-material');
 const { createTicketStore } = require('./tickets');
 const { createKanban, CALLBACK_PATH } = require('./kanban');
+const { createTicketBoardSync } = require('./ticket-board');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const VERSION = require('../package.json').version;
@@ -57,9 +58,10 @@ function securityHeaders(req, res, next) {
 }
 
 /** Creates the Express application. `pool` is a pg Pool, `config` comes from loadConfig(). */
-function createApp({ pool, config, certificates, runtime, pgp, securityMaterial, tickets, kanban }) {
+function createApp({ pool, config, certificates, runtime, pgp, securityMaterial, tickets, kanban, ticketBoard }) {
   if (!tickets) tickets = createTicketStore({ pool, config });
   if (!kanban) kanban = createKanban(config.kanban, { pool });
+  if (!ticketBoard) ticketBoard = createTicketBoardSync({ kanban, tickets, config });
   const app = express();
   const cpiClient = cpiConfigured(config) ? createClient(config.poller) : null;
   if (!runtime) runtime = createRuntimeStore({ pool, client: cpiClient, staleMinutes: config.runtime.staleMinutes, lockWarnHours: config.runtime.lockWarnHours });
@@ -106,7 +108,7 @@ function createApp({ pool, config, certificates, runtime, pgp, securityMaterial,
   // Everything below needs a signed-in user (login page, session cookie; Basic credentials for scripts).
   app.use(requireLogin({ ...config.auth, ssoClient: createSso(config.auth.sso) }));
   app.use(express.json({ limit: '100kb' }));
-  app.use('/api', apiRouter({ pool, config, certificates, runtime, pgp, securityMaterial, tickets, kanban }));
+  app.use('/api', apiRouter({ pool, config, certificates, runtime, pgp, securityMaterial, tickets, kanban, ticketBoard }));
   // The Kanban app sends the browser back here after the sign-in ("Connect Kanban board").
   app.get(CALLBACK_PATH, async (req, res) => {
     const back = (q) => res.redirect(303, '/?' + new URLSearchParams(q).toString());
@@ -127,6 +129,7 @@ function createApp({ pool, config, certificates, runtime, pgp, securityMaterial,
   app.use(express.static(PUBLIC_DIR, { index: false, setHeaders: (res) => res.set('Cache-Control', 'no-cache') }));
   app.use(errorHandler);
   app.locals.certificates = certificates;
+  app.locals.ticketBoard = ticketBoard;
   app.locals.runtime = runtime;
   app.locals.pgp = pgp;
   app.locals.securityMaterial = securityMaterial;

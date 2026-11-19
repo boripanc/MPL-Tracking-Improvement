@@ -394,6 +394,10 @@ accepts **https** callbacks (or http on localhost):
 | `KANBAN_AUTO_ASSIGNEE` | (by capacity) | Empty = member with the most free capacity; names (comma-separated) = always them; `none` = unassigned. |
 | `KANBAN_CARD_URL` | (none) | Link to a card in the Kanban app (`{id}` = card id), used in the error details. |
 | `KANBAN_TIMEOUT_MS` | `20000` | Timeout per MCP request. |
+| `KANBAN_TICKET_BOARD` | `Ticket pulse` | WorkStream board that gets a copy of the Ticket pulse tickets (created when missing). `off` = no sync. |
+| `KANBAN_TICKET_SYNC_MINUTES` | `15` | How often the tickets are copied to that board. |
+| `KANBAN_TICKET_DONE_DAYS` | `14` | Resolved / closed tickets stay on the board this many days after they were closed. |
+| `KANBAN_TICKET_TZ` | `Asia/Bangkok` | Time zone for the due dates on the ticket cards. |
 
 Assignees picked in the form are requests: the board owner approves them in the Kanban app.
 
@@ -410,6 +414,21 @@ Set `KANBAN_AUTO_ASSIGNEE` to fixed names to always assign them, or `none` to ne
 approves assignments in the Kanban app. The known error
 is saved even if the Kanban server fails; the app then says why no card was created. Turn it off with
 `KANBAN_AUTO_CARD=false`.
+
+**Ticket pulse on WorkStream (read only).** While the Kanban board is connected, the server copies the Ticket pulse
+tickets to the WorkStream board `KANBAN_TICKET_BOARD` ("Ticket pulse") every `KANBAN_TICKET_SYNC_MINUTES`. The
+first run creates the board with the columns Open, In Progress, Pending and Resolved / Closed. Each ticket is one
+card titled `<ticket id> · <subject>`, in the column of its status (other open statuses, such as waiting on the
+customer, go to Pending), with the Freshservice status, responder, group, link and due date in the notes; an overdue
+ticket gets priority high; the ticket type is the label. Cards stay unassigned (the responder is in the notes).
+The same tickets as on Ticket pulse are copied: noncharge tickets and Standard / Normal / Emergency changes are left
+out. Open tickets stay until they close; closed ones leave after `KANBAN_TICKET_DONE_DAYS`.
+
+The sync is one way: nothing goes back to Freshservice, and each run puts every ticket card back the way Freshservice
+has it, so a card dragged or edited on the board is reset within one interval. Cards whose title does not start with a
+ticket id (added by hand) are left alone. WorkStream itself cannot lock a board: share it with others as viewers so
+only the owner can touch it. Ticket pulse shows when the board was last synced and has a **Sync now** button
+(`POST /api/kanban/ticket-board/sync`).
 
 ## Optional: pull errors from CPI directly
 
@@ -465,6 +484,8 @@ All endpoints are under `/api`, require login and return JSON. Errors return `{ 
 | `GET /api/errors/:guid/card` | Kanban: the suggested card for this error, the board's columns, labels and team, and the cards that already mention the message ID |
 | `POST /api/errors/:guid/card` | Create a Kanban card: `{ title, description, column, labels, priority, assignees, dueDate }` (all optional; missing fields use the suggestion and the `KANBAN_*` defaults). 409 when Kanban is not set up or not connected (`connect: true`), 502 when the Kanban server fails |
 | `GET /api/kanban/status` | Kanban connection: `enabled`, `connected`, `auth` (oauth/token), who connected and when |
+| `GET /api/kanban/ticket-board` | Ticket pulse WorkStream sync: board name, interval, result of the last run |
+| `POST /api/kanban/ticket-board/sync` | Runs the ticket sync now and returns the result (409 when the sync is off) |
 | `POST /api/kanban/connect` | Start the Kanban sign-in; returns `{ url, paste }` (`paste: true` = the app is on plain http, see above) |
 | `POST /api/kanban/finish` | Finish the sign-in with the pasted callback address: `{ url }` (app on plain http) |
 | `POST /api/kanban/disconnect` | Forget the Kanban tokens |

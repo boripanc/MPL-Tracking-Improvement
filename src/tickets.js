@@ -255,7 +255,28 @@ SELECT json_build_object(
     return t;
   }
 
-  return { pulse, ticket };
+  /**
+   * Tickets for the WorkStream board: every open ticket plus those resolved / closed in the last `doneDays` days,
+   * with the same exclusions as Ticket pulse (noncharge tag, Standard / Normal / Emergency changes).
+   * Returns null when the tickets table is not there.
+   */
+  async function boardTickets({ doneDays = 14 } = {}) {
+    const src = await source();
+    if (!src.ok) return null;
+    const { rows } = await pool.query(
+      `WITH ${tk(src)}
+       SELECT id, subject, type, status, closed, pending_reason, grp, responder, requester, entity, category, sub_category, item,
+              created_at, updated_at, due_by
+       FROM tk
+       WHERE NOT closed OR updated_at >= now() - make_interval(days => $1::int)
+       ORDER BY created_at`,
+      [doneDays],
+    );
+    rows.forEach((t) => { t.link = ticketLink(config.tickets.linkTemplate, t.id); });
+    return rows;
+  }
+
+  return { pulse, ticket, boardTickets };
 }
 
 module.exports = { createTicketStore, CLOSURE_FIELDS, BUCKETS, parseTableName, ticketLink, CLOSED_STATUSES, EXCLUDED_TAGS, EXCLUDED_CHANGE_TYPES };

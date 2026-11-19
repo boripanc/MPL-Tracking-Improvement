@@ -1376,6 +1376,7 @@ function loadTickets() {
         '<div class="row" style="margin-bottom:8px"><b id="tk-count"></b><span class="sp"></span><div class="seg" role="group" aria-label="Layout">' +
           ['list', 'board'].map(function (x) { return '<button class="btn sm' + (x === S.tkLayout ? ' on' : '') + '" data-tl="' + x + '" aria-pressed="' + (x === S.tkLayout) + '">' + (x === 'list' ? 'List' : 'Board') + '</button>'; }).join('') +
         '</div></div><div class="scroll" id="tk-tab"></div></div>' +
+      '<div class="row muted small" id="tk-ws" style="margin-top:8px" hidden></div>' +
       '<h2 class="sec">Closure notes</h2><div class="card" id="tk-closure"></div>' +
       '<details class="card mt" id="tk-break"' + (open ? ' open' : '') + '><summary><b>Breakdowns</b> <span class="muted small">open tickets by group, responder and status; top sub-categories</span></summary>' +
         '<div class="grid half mt">' +
@@ -1410,11 +1411,32 @@ function loadTickets() {
     $$('#v-tickets tr[data-ts], #v-tickets tr[data-tp]').forEach(function (t) { t.onclick = pick(function (el) { return { q: (el.dataset.ts || el.dataset.tp).toLowerCase() }; }); });
     $$('#v-tickets tr[data-tc]').forEach(function (t) { t.classList.remove('click'); });
     drawTickets(d);
+    loadTicketBoardStatus();
     renderMonth();
     renderTickets();
     renderClosure();
   });
 }
+// One line under the open tickets about the WorkStream copy of the tickets (shown only when the sync is on).
+function renderTicketBoardStatus(st) {
+  var el = $('#tk-ws');
+  if (!el) return;
+  if (!st || !st.enabled) { el.hidden = true; return; }
+  var l = st.last, text;
+  if (st.running) text = 'syncing now…';
+  else if (!l) text = 'first sync starts shortly after the server starts, then every ' + st.minutes + ' min';
+  else if (!l.ok) text = '<span class="bad">last sync failed (' + esc(l.error) + ')</span>';
+  else if (l.skipped) text = 'not synced: ' + esc(l.skipped === 'not connected' ? 'the Kanban board is not connected (use Connect Kanban board in the error details)' : l.skipped);
+  else text = 'synced ' + esc(dt(l.at)) + ': ' + fmt(l.tickets) + ' tickets' + (l.created || l.updated || l.removed ? ' (' + [l.created && l.created + ' added', l.updated && l.updated + ' changed', l.removed && l.removed + ' removed'].filter(Boolean).join(', ') + ')' : '') + (l.failed ? ', <span class="bad">' + l.failed + ' failed</span>' : '');
+  el.innerHTML = '<span>WorkStream board <b>' + esc(st.board) + '</b> (read only, every ' + st.minutes + ' min): ' + text + '</span>' +
+    '<button class="btn sm" id="tk-ws-sync"' + (st.running ? ' disabled' : '') + '>Sync now</button>';
+  el.hidden = false;
+  $('#tk-ws-sync').onclick = function () {
+    renderTicketBoardStatus(Object.assign({}, st, { running: true }));
+    request('POST', 'api/kanban/ticket-board/sync').then(renderTicketBoardStatus).catch(function (e) { fail(e); loadTicketBoardStatus(); });
+  };
+}
+function loadTicketBoardStatus() { get('api/kanban/ticket-board').then(renderTicketBoardStatus).catch(function () {}); }
 function renderMonth() {
   var d = S.cache.tickets, m = d.month, labels = closureLabels(d);
   var name = tkPicked() ? monthName(tkPicked()) : new Date(m.start).toLocaleString(undefined, { month: 'long', year: 'numeric' });
