@@ -325,6 +325,7 @@ function createKanban(cfg, { pool, env = process.env } = {}) {
         const args = { boardId: b.id, column: c.column, title: c.title, description: c.description };
         if (c.priority && c.priority !== 'none') args.priority = c.priority;
         if (c.startDate) args.startDate = c.startDate;
+        if (c.estimateDays) args.estimateDays = c.estimateDays;
         if (c.dueDate) args.dueDate = c.dueDate;
         if (c.labels && c.labels.length) args.labels = c.labels;
         if (c.assignees && c.assignees.length) args.assignees = c.assignees;

@@ -29,6 +29,16 @@ function day(ts, tz) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ts));
 }
 
+/** Weekdays (Mon-Fri) from `from` to `to` (YYYY-MM-DD), both days counted; at least 1. Public holidays are not known. */
+function weekdays(from, to) {
+  if (!from || !to) return null;
+  const d = new Date(from + 'T00:00:00Z');
+  const end = new Date(to + 'T00:00:00Z');
+  let n = 0;
+  for (; d <= end; d.setUTCDate(d.getUTCDate() + 1)) if (d.getUTCDay() % 6 !== 0) n += 1;
+  return Math.max(1, n);
+}
+
 /** The card a ticket should be: { title, column, description, priority, startDate, dueDate, labels, assignees }. */
 function cardFor(t, { tz = 'Asia/Bangkok', now = Date.now() } = {}) {
   const overdue = !t.closed && t.due_by && new Date(t.due_by).getTime() < now;
@@ -40,6 +50,7 @@ function cardFor(t, { tz = 'Asia/Bangkok', now = Date.now() } = {}) {
     [t.category, t.sub_category, t.item].some(Boolean) ? `Category: ${[t.category, t.sub_category, t.item].filter(Boolean).join(' > ')}` : null,
     `Created: ${day(t.created_at, tz)}`,
     t.closed ? `Closed: ${day(t.updated_at, tz)}` : null,
+    t.closed ? `Man-days: ${weekdays(day(t.created_at, tz), day(t.updated_at, tz))} (weekdays from created to closed)` : null,
     t.link ? `Open in Freshservice: ${t.link}` : null,
     '',
     'Read only: this card is kept in step with Freshservice by CPI Error Center. Changes made here are reset on the next sync.',
@@ -50,7 +61,9 @@ function cardFor(t, { tz = 'Asia/Bangkok', now = Date.now() } = {}) {
     description: lines.join('\n'),
     priority: overdue ? 'high' : 'none',
     startDate: day(t.created_at, tz),
-    dueDate: t.closed ? null : day(t.due_by, tz),
+    // Closed: due = the close date and the estimate (man-days) = weekdays from created to closed.
+    dueDate: t.closed ? day(t.updated_at, tz) : day(t.due_by, tz),
+    estimateDays: t.closed ? weekdays(day(t.created_at, tz), day(t.updated_at, tz)) : null,
     labels: t.type ? [t.type] : [],
     assignees: t.responder ? [t.responder] : [],
   };
@@ -89,7 +102,14 @@ function changes(have, want) {
   if ((have.description || '') !== want.description) out.description = want.description;
   if ((have.priority || 'none') !== want.priority) out.priority = want.priority;
   if ((have.startDate || null) !== want.startDate) out.startDate = want.startDate;
-  if ((have.dueDate || null) !== want.dueDate) out.dueDate = want.dueDate;
+  if (want.estimateDays != null) {
+    // WorkStream works the due date out from the start date and the estimate itself, so for a closed ticket only the
+    // estimate is compared (the close date goes along with it), or the two would keep resetting each other.
+    if (have.estimateDays !== want.estimateDays) Object.assign(out, { estimateDays: want.estimateDays, dueDate: want.dueDate });
+  } else {
+    if (have.estimateDays != null) out.estimateDays = null;
+    if ((have.dueDate || null) !== want.dueDate) out.dueDate = want.dueDate;
+  }
   if (JSON.stringify(labelNames(have.labels)) !== JSON.stringify(labelNames(want.labels))) out.labels = want.labels;
   if (want.assignees && needsAssignment(have, want.assignees)) out.assignees = want.assignees;
   return out;
@@ -178,4 +198,4 @@ function createTicketBoardSync({ kanban, tickets, config, logger = console }) {
   };
 }
 
-module.exports = { COLUMNS, columnFor, cardFor, ticketIdOf, changes, plan, syncTicketBoard, createTicketBoardSync };
+module.exports = { weekdays, COLUMNS, columnFor, cardFor, ticketIdOf, changes, plan, syncTicketBoard, createTicketBoardSync };

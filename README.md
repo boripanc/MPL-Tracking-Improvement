@@ -419,7 +419,8 @@ is saved even if the Kanban server fails; the app then says why no card was crea
 tickets to the WorkStream board `KANBAN_TICKET_BOARD` ("Ticket pulse") every `KANBAN_TICKET_SYNC_MINUTES`. The
 first run creates the board with the columns Open, In Progress, Pending and Resolved / Closed. Each ticket is one
 card titled `<ticket id> · <subject>`, in the column of its status (other open statuses, such as waiting on the
-customer, go to Pending), with the Freshservice status, responder, group and link in the notes, the ticket's created date as start date and its due date as due date; an overdue
+customer, go to Pending), with the Freshservice status, responder, group and link in the notes, the ticket's created date as start date and its due date as due date (a closed ticket: the close date, with the
+weekdays from created to closed, both counted, as the estimate in man-days; public holidays are not left out); an overdue
 ticket gets priority high; the ticket type is the label. Each card is assigned to the ticket's agent (the Freshservice responder; unassigned tickets stay unassigned).
 WorkStream asks the board owner to approve each assignment, and a request still waiting is not sent again; an agent
 the board team does not have yet joins the team once approved.
