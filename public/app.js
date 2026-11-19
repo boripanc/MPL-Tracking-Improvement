@@ -1373,7 +1373,9 @@ function loadTickets() {
       '<div class="card"><div class="filters"><select id="tf-view" aria-label="Show"></select><select id="tf-grp" aria-label="Group"></select><select id="tf-resp" aria-label="Responder"></select>' +
         '<input id="tf-q" type="search" placeholder="Search ticket, subject, category, requester or entity" style="min-width:220px;flex:1">' +
         '<button class="btn" id="tf-clear">Clear</button><button class="btn" id="tf-csv">Export CSV</button></div>' +
-        '<div class="row" style="margin-bottom:8px"><b id="tk-count"></b></div><div class="scroll" id="tk-tab"></div></div>' +
+        '<div class="row" style="margin-bottom:8px"><b id="tk-count"></b><span class="sp"></span><div class="seg" role="group" aria-label="Layout">' +
+          ['list', 'board'].map(function (x) { return '<button class="btn sm' + (x === S.tkLayout ? ' on' : '') + '" data-tl="' + x + '" aria-pressed="' + (x === S.tkLayout) + '">' + (x === 'list' ? 'List' : 'Board') + '</button>'; }).join('') +
+        '</div></div><div class="scroll" id="tk-tab"></div></div>' +
       '<h2 class="sec">Closure notes</h2><div class="card" id="tk-closure"></div>' +
       '<details class="card mt" id="tk-break"' + (open ? ' open' : '') + '><summary><b>Breakdowns</b> <span class="muted small">open tickets by group, responder and status; top sub-categories</span></summary>' +
         '<div class="grid half mt">' +
@@ -1394,6 +1396,14 @@ function loadTickets() {
     $('#tf-q').oninput = function () { S.tf.q = this.value.trim().toLowerCase(); renderTickets(); };
     $('#tf-clear').onclick = function () { S.tf = { view: 'all', grp: '', responder: '', q: '' }; $('#tf-q').value = ''; renderTickets(); };
     $('#tf-csv').onclick = exportTicketCsv;
+    $$('#v-tickets [data-tl]').forEach(function (b) {
+      b.onclick = function () {
+        S.tkLayout = b.dataset.tl;
+        try { localStorage.setItem('cpiec-tklayout', S.tkLayout); } catch (e) {}
+        $$('#v-tickets [data-tl]').forEach(function (x) { x.classList.toggle('on', x === b); x.setAttribute('aria-pressed', String(x === b)); });
+        renderTickets();
+      };
+    });
     var pick = function (patch) { return function () { Object.assign(S.tf, patch(this)); renderTickets(); $('#tk-tab').scrollIntoView({ behavior: 'smooth', block: 'center' }); }; };
     $$('#v-tickets tr[data-tg]').forEach(function (t) { t.onclick = pick(function (el) { return { grp: el.dataset.tg, responder: '' }; }); });
     $$('#v-tickets tr[data-tr]').forEach(function (t) { t.onclick = pick(function (el) { return { responder: el.dataset.tr, grp: '' }; }); });
@@ -1441,6 +1451,49 @@ function renderMonth() {
   bindMore('#tk-month', renderMonth);
   bindRows('#tk-month', rows);
 }
+// Board layout of the open tickets: one column per Freshservice status, plus the tickets closed in the month shown
+// above. Read only: nothing can be dragged or changed, and the app never writes to Freshservice.
+var TK_STATUS_ORDER = ['Open', 'In Progress', 'Pending', 'Awaiting Approval', 'Waiting on Customer', 'Waiting on Third Party', 'On Hold'];
+S.tkLayout = 'list';
+try { if (localStorage.getItem('cpiec-tklayout') === 'board') S.tkLayout = 'board'; } catch (e) {}
+function tkBoardColumns(open, closed) {
+  var cols = {};
+  open.forEach(function (t) { var k = t.status || 'None'; (cols[k] = cols[k] || []).push(t); });
+  var rank = function (k) { var i = TK_STATUS_ORDER.indexOf(k); return i < 0 ? TK_STATUS_ORDER.length : i; };
+  var list = Object.keys(cols).sort(function (a, b) { return rank(a) - rank(b) || a.localeCompare(b); })
+    .map(function (k) { return { title: k, rows: cols[k] }; });
+  if (closed) list.push({ title: 'Resolved / closed', rows: closed, done: true });
+  return list;
+}
+function renderBoard(open) {
+  var d = S.cache.tickets, f = S.tf;
+  // Closed tickets only fit when the list is not narrowed to an open-only view (overdue, due soon, ...).
+  var closed = f.view === 'all' ? d.month.rows.filter(function (t) { return t.closed && tkMatches(t, f, d.dueSoonHours); })
+    .sort(function (a, b) { return new Date(b.updated_at) - new Date(a.updated_at); }) : null;
+  var name = tkPicked() ? monthName(tkPicked()) : 'this month';
+  if (!open.length && !(closed && closed.length)) { $('#tk-tab').innerHTML = '<div class="empty">No tickets match these filters.</div>'; return; }
+  var rows = [];
+  $('#tk-tab').innerHTML = '<div class="kb">' + tkBoardColumns(open, closed).map(function (c) {
+    return '<section class="kb-col" aria-label="' + esc(c.title) + '"><h3>' + (c.done ? '<span class="pill tkd">' + esc(c.title) + '</span>' : tkStatus(c.title)) +
+      ' <span class="muted">' + fmt(c.rows.length) + '</span>' + (c.done ? ' <small>created ' + esc(name) + '</small>' : '') + '</h3>' +
+      (c.rows.length ? c.rows.map(function (t) {
+        var i = rows.push(t) - 1;
+        var foot = c.done ? '<span class="muted">closed ' + esc(dt(t.updated_at)) + '</span>'
+          : '<span title="Age since created">' + ageText(t.created_at) + ' old</span>' + (t.due_by ? ' · ' + dueText(t.due_by) : '');
+        return '<article class="kb-card" data-k="' + i + '" tabindex="0">' +
+          '<div class="kb-top">' + tkId(t) + (t.type ? '<span class="muted small">' + esc(t.type) + '</span>' : '') + '</div>' +
+          '<div class="kb-sub">' + esc(short(t.subject, 110)) + '</div>' +
+          (t.pending_reason && !c.done ? '<div class="muted small">' + esc(t.pending_reason) + '</div>' : '') +
+          '<div class="small">' + tkOwner(t) + '</div>' +
+          '<div class="small kb-foot">' + foot + '</div></article>';
+      }).join('') : '<div class="empty small">None</div>') + '</section>';
+  }).join('') + '</div><p class="muted small">Read only: the board shows tickets as they are in Freshservice and nothing here can be moved or edited. Change a ticket in Freshservice and it moves to its new column after the next n8n refresh.</p>';
+  $$('#tk-tab .kb-card').forEach(function (el) {
+    var go = function (e) { if (e.target.closest('[data-ext]')) return; openTicket(rows[+el.dataset.k].id); };
+    el.onclick = go;
+    el.onkeydown = function (e) { if (e.key === 'Enter') go(e); };
+  });
+}
 function renderTickets() {
   var d = S.cache.tickets, f = S.tf, k = d.kpi;
   $('#tk-kpis').innerHTML =
@@ -1462,6 +1515,7 @@ function renderTickets() {
   var all = d.open.filter(function (t) { return tkMatches(t, f, d.dueSoonHours); });
   S.cache.ticketRows = all;
   $('#tk-count').textContent = fmt(all.length) + ' of ' + fmt(k.open) + ' open tickets' + (d.open.length < k.open ? ' (the list holds the first ' + fmt(d.open.length) + ')' : '') + ', overdue first';
+  if (S.tkLayout === 'board') { renderBoard(all); return; }
   if (!all.length) { $('#tk-tab').innerHTML = '<div class="empty">No open tickets match these filters.</div>'; return; }
   var rows = tkPage('open', all);
   $('#tk-tab').innerHTML = '<table><thead><tr><th>Ticket</th><th>Subject</th><th>Category</th><th>Status</th><th>Responder</th><th class="num">Age</th><th>Due</th><th class="num">Since last comment</th><th>Last comment</th></tr></thead><tbody>' +
