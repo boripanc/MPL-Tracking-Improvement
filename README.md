@@ -20,6 +20,7 @@ existing `errorscenario` view, so the app and the view always agree.
 | **Kanban card** (in the error details) | Turns an error into a card on the TodoList Kanban board (through the board's MCP server). The form is filled with the iFlow, message and correlation IDs, category, known root cause, CPI link and error text; pick the column, priority, labels, assignee and due date, then create. The error details list the cards that already mention the message ID, so the same error is not filed twice. Shown only when `KANBAN_MCP_URL` is set; the first time, someone clicks **Connect Kanban board** and signs in to the Kanban app. |
 | **Certificates** | Certificates and key pairs in the CPI tenant keystore (stored in the database by the n8n workflow) with their expiry date and days left: **Expired**, **Expires soon** (< 30 days), **Expiring** (< 90 days) or **Valid**. Filter by status or type, hide SAP-owned entries, search, open the full details (subject, issuer, serial, fingerprint) and export CSV. The menu shows a red badge with the number of expired and soon-expiring entries. |
 | **PGP keys** | Keys in the CPI PGP public keyring (partner keys) and secret keyring (our own keys), stored in the database by the n8n workflow, with owner (user ID and e-mail), key ID, algorithm, created date, expiry date and days left: **Expired**, **Expires soon** (< 30 days), **Expiring** (< 90 days), **Valid** or **No expiry**. A key counts as expiring when its primary key or all of its encryption subkeys end. Filter by status or keyring, search by owner, key ID or fingerprint, open the details (all user IDs, subkeys, CPI status), see who last changed each keyring, export CSV. The menu shows a red badge with the number of expired and soon-expiring keys. Read-only: import keys in CPI. |
+| **Security material** | User credentials, OAuth2 client credentials and secure parameters deployed in CPI, stored in the database by the n8n workflow: name, type, user or client ID, token URL, CPI status, last deployed date, age and who deployed it. **Not deployed** (CPI status other than DEPLOYED) and **Due for rotation** (not changed for `SECMAT_ROTATE_DAYS`, default 365 days). Filter by status or type, search, open the details, export CSV. The menu shows a red badge with the number of artifacts that are not deployed. Passwords, client secrets and secure parameter values are never read, stored or shown. Read-only: change security material in CPI. |
 | **Locks** | Design-time artifact locks in CPI (Monitor → Manage Design-Time Artifact Locks): iFlows, value mappings, script collections and other artifacts someone opened for editing, with package, who locked it, since when and for how long. Artifacts locked for `LOCK_WARN_HOURS` (24) or more are flagged and counted in the menu badge. Filter by type or person, search, show artifacts unlocked in the last 7 days, export CSV. Read-only: unlock artifacts in CPI. |
 | **Message queues** | JMS queues in CPI (Monitor → Manage Stores → Message Queues) with messages waiting, failed messages, oldest message, size, fill level, status (**Full**, **Nearly full**, **Failed messages**, **Inactive**, **Messages waiting**, **OK**) and the iFlows that use each queue, plus the tenant's JMS storage and queue limits. Open a queue to see its messages (retries, next retry, sender/receiver, link to the error when the message log is in the database). The menu badge counts failed messages and full queues. Read-only: retry or delete messages in CPI. |
 
@@ -225,6 +226,32 @@ causes on company servers:
 | *OAuth token request failed: HTTP 401* | Wrong `CPI_CLIENT_ID` / `CPI_CLIENT_SECRET`, or they come from a different service key than `CPI_TOKEN_URL`. |
 | *Read keystore … HTTP 403* | The service key may not read the keystore; add the role to the service instance. |
 | *Got text/html instead of JSON* | `CPI_API_URL` points to the web UI instead of the tenant API (`…it-cpiNNN…/api/v1`). |
+
+## Security material
+
+The **Security material** menu reads from the database too. The tables (created automatically, also in `db/schema.sql`):
+
+- `cpi_security_material`: one row per artifact (`GET /api/v1/UserCredentials`, `/OAuth2ClientCredentials`,
+  `/SecureParameters`): name, type, user or client ID, SuccessFactors company ID, OAuth2 token URL, client
+  authentication, scope, CPI status, last deployed and by whom, and when it was first seen, last seen and removed.
+  An OAuth2 client credential also appears in `UserCredentials`; it is stored once, as OAuth2.
+- `cpi_security_material_sync`: one row per sync, with the number of artifacts of each type.
+
+**Secrets are never stored.** CPI does not return passwords, client secrets or secure parameter values, and every field
+whose name could hold one (`Password`, `ClientSecret`, `SecureParam`, ...) is dropped by the app, by the n8n workflow
+and again by the SQL before anything is written.
+
+**Who fills the tables**
+
+1. **n8n workflow "CPI Security Material → Postgres"** (recommended). It runs every 6 hours with the same OAuth
+   credential as the keystore workflow and stores the result with the same SQL as the app (`syncSecurityMaterial` in
+   `src/sql.js`). If CPI does not answer for one type, that type is left as it is; artifacts that are gone are marked
+   as removed, not deleted.
+2. **The app itself**, only when this server has the CPI connection set (same variables as for certificates). It then
+   syncs every `CERT_SYNC_INTERVAL_MINUTES` and shows a **Sync from CPI now** button.
+
+`SECMAT_ROTATE_DAYS` (default 365) sets when an artifact counts as due for rotation; the out-of-date warning follows
+`CERT_STALE_HOURS`. Keystore certificates stay on the Certificates menu and PGP keys on the PGP keys menu.
 
 ## PGP keys
 
@@ -455,6 +482,8 @@ All endpoints are under `/api`, require login and return JSON. Errors return `{ 
 | `POST /api/certificates/sync` | Copy the keystore from CPI into the database now (only when this server has a CPI connection; otherwise 409) |
 | `GET /api/pgp-keys` | PGP keys from the database with `state` (expired / critical / warning / ok / never), `daysLeft`, `validUntil` (primary key or encryption subkeys, whichever ends first), subkeys, the keyrings, a summary and the last sync. `?removed=1` includes removed keys |
 | `POST /api/pgp-keys/sync` | Copy the PGP keys from CPI into the database now (only when this server has a CPI connection; otherwise 409) |
+| `GET /api/security-material` | Security material from the database (no secrets) with `kind` (user / oauth2 / secure_param / successfactors / openconnectors / other), `state` (error / old / ok), `ageDays`, a summary and the last sync. `?removed=1` includes removed artifacts |
+| `POST /api/security-material/sync` | Copy the security material from CPI into the database now (only when this server has a CPI connection; otherwise 409) |
 | `GET /api/locks` | Design-time artifact locks from the database with `state` (locked / old / released), age, a summary by type and person and the last sync. `?released=7` adds artifacts unlocked in the last 7 days |
 | `GET /api/queues` | JMS queues from the database with `state`, messages, failed messages, oldest message, iFlows, the broker figures and the last sync. `?removed=1` includes removed queues |
 | `GET /api/queues/:name` | One queue with its stored messages |
@@ -488,6 +517,7 @@ src/
   cpi/client.js      CPI OData API client (OAuth2 client credentials)
   cpi/certificates.js keystore store/read in the database + expiry classification (Certificates menu)
   cpi/pgp.js         PGP keys: read from CPI, store/read in the database + expiry (PGP keys menu)
+  cpi/security-material.js user credentials, OAuth2 client credentials, secure parameters: read from CPI (no secrets), store/read in the database (Security material menu)
   cpi/runtime.js     design-time locks and JMS queues: read from CPI, store/read in the database (Locks, Message queues menus)
   kanban.js          MCP client for the TodoList Kanban board (OAuth sign-in, create a card from an error)
   tickets.js         Ticket pulse queries on the Freshservice tickets table (filled by n8n)

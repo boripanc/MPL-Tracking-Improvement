@@ -100,7 +100,7 @@ async function kanbanCall(fn) {
 
 /* ---------- router ---------- */
 
-function apiRouter({ pool, config, certificates, runtime, pgp, tickets, kanban }) {
+function apiRouter({ pool, config, certificates, runtime, pgp, securityMaterial, tickets, kanban }) {
   const router = express.Router();
   const run = (sql, params) => queryResult(pool, sql, params);
   const handle = (fn) => (req, res, next) => {
@@ -340,6 +340,23 @@ function apiRouter({ pool, config, certificates, runtime, pgp, tickets, kanban }
     } catch (err) {
       console.error('[pgp] sync failed:', err.message);
       throw new HttpError(502, `Could not read the PGP keys from CPI: ${err.message}`);
+    }
+  }));
+
+  // Security material (user credentials, OAuth2 client credentials, secure parameters): names, users and dates only,
+  // read from the database (filled by the n8n workflow or the app's own sync). Secrets are never stored or returned.
+  router.get('/security-material', handle((req) => securityMaterial.read({ includeRemoved: req.query.removed === '1' })));
+
+  // Copy the security material from CPI into the database now (only when this server has a CPI connection).
+  router.post('/security-material/sync', handle(async () => {
+    if (!securityMaterial.canSync) {
+      throw new HttpError(409, 'This server has no CPI connection, so it cannot sync. The n8n workflow "CPI Security Material → Postgres" keeps the data up to date.');
+    }
+    try {
+      return await securityMaterial.sync({ source: 'app' });
+    } catch (err) {
+      console.error('[security-material] sync failed:', err.message);
+      throw new HttpError(502, `Could not read the security material from CPI: ${err.message}`);
     }
   }));
 

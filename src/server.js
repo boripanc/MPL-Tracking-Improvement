@@ -9,6 +9,7 @@ const { startPoller } = require('./poller/cpi');
 const { startCertificateSync } = require('./cpi/certificates');
 const { startRuntimeSync } = require('./cpi/runtime');
 const { startPgpSync } = require('./cpi/pgp');
+const { startSecurityMaterialSync } = require('./cpi/security-material');
 
 const config = loadConfig(process.env);
 const problems = validateConfig(config);
@@ -22,6 +23,7 @@ console.log(envFiles.length ? `Settings read from ${envFiles.join(', ')} and the
 if (cpiConfigured(config)) {
   console.log(`[certificates] read from the database; this server also syncs the keystore from ${new URL(config.poller.apiUrl).host} every ${config.certificates.syncIntervalMinutes} min`);
   console.log(`[pgp] read from the database; this server also syncs the PGP keys from CPI every ${config.certificates.syncIntervalMinutes} min`);
+  console.log(`[security-material] read from the database; this server also syncs it from CPI every ${config.certificates.syncIntervalMinutes} min`);
   console.log(`[locks/queues] read from the database; this server also syncs them from CPI every ${config.runtime.syncIntervalMinutes} min`);
 } else {
   console.log(`[certificates] read from the database (filled by n8n); no CPI connection here (${missingCpiVars(config).join(', ')} not set), so no sync from this server`);
@@ -43,6 +45,9 @@ const runtimeSync = app.locals.runtime.canSync
 const pgpSync = app.locals.pgp.canSync
   ? startPgpSync({ store: app.locals.pgp, intervalMinutes: config.certificates.syncIntervalMinutes })
   : null;
+const secSync = app.locals.securityMaterial.canSync
+  ? startSecurityMaterialSync({ store: app.locals.securityMaterial, intervalMinutes: config.certificates.syncIntervalMinutes })
+  : null;
 
 let stopping = false;
 async function shutdown(signal) {
@@ -53,6 +58,7 @@ async function shutdown(signal) {
   if (certSync) certSync.stop();
   if (runtimeSync) runtimeSync.stop();
   if (pgpSync) pgpSync.stop();
+  if (secSync) secSync.stop();
   server.close(() => pool.end().finally(() => process.exit(0)));
   setTimeout(() => process.exit(1), 10000).unref();
 }

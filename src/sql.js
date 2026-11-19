@@ -356,6 +356,92 @@ SELECT json_build_object(
       ORDER BY valid_until NULLS LAST, primary_user_id) k)
 ) AS result`;
 
+/* ---------- Security material (CPI credentials and secure parameters stored in the database) ---------- */
+
+// Keys that may hold a secret. They are dropped from the stored copy of the CPI record, whatever CPI returns.
+const SECRET_KEYS = `'(password|secret|secureparam|^__)'`;
+const cleanRecord = (x) => `(SELECT COALESCE(jsonb_object_agg(e.key, CASE WHEN jsonb_typeof(e.value) = 'object'
+        THEN (SELECT COALESCE(jsonb_object_agg(i.key, i.value), '{}'::jsonb) FROM jsonb_each(e.value) i WHERE i.key !~* ${SECRET_KEYS})
+        ELSE e.value END), '{}'::jsonb)
+      FROM jsonb_each(${x}) e WHERE e.key !~* ${SECRET_KEYS} AND e.key <> 'CustomParameters')`;
+
+// $1 = { source, userCredentials: [raw UserCredentials] | null, oauth2: [raw OAuth2ClientCredentials] | null,
+// secureParameters: [raw SecureParameters] | null }. null (or missing) means "CPI did not answer this time": the
+// artifacts of that kind are left as they are. An empty list means "there are none". An OAuth2 client credential
+// also appears in UserCredentials (Kind oauth2:default); the OAuth2ClientCredentials record wins. Upserts all
+// artifacts, marks artifacts that are gone as removed and writes one row to cpi_security_material_sync. Passwords,
+// client secrets and secure parameter values are never stored. The same statement is used by the n8n workflow
+// "CPI Security Material → Postgres".
+const syncSecurityMaterial = `WITH p AS (SELECT $1::jsonb AS j),
+f AS (SELECT jsonb_typeof(j->'userCredentials') = 'array' AS user_ok, jsonb_typeof(j->'oauth2') = 'array' AS oauth_ok,
+             jsonb_typeof(j->'secureParameters') = 'array' AS secure_ok FROM p),
+src AS (
+  SELECT 1 AS prio, 'oauth2' AS fam, r FROM p, jsonb_array_elements(CASE WHEN jsonb_typeof(p.j->'oauth2') = 'array' THEN p.j->'oauth2' ELSE '[]'::jsonb END) r
+  UNION ALL
+  SELECT 2, 'user', r FROM p, jsonb_array_elements(CASE WHEN jsonb_typeof(p.j->'userCredentials') = 'array' THEN p.j->'userCredentials' ELSE '[]'::jsonb END) r
+  UNION ALL
+  SELECT 3, 'secure', r FROM p, jsonb_array_elements(CASE WHEN jsonb_typeof(p.j->'secureParameters') = 'array' THEN p.j->'secureParameters' ELSE '[]'::jsonb END) r),
+rows AS (
+  SELECT DISTINCT ON (name) * FROM (
+    SELECT r->>'Name' AS name, prio,
+           CASE WHEN fam = 'oauth2' THEN 'oauth2' WHEN fam = 'secure' THEN 'secure_param'
+                WHEN COALESCE(r->>'Kind', 'default') IN ('', 'default') THEN 'user'
+                WHEN r->>'Kind' ILIKE 'oauth2%' THEN 'oauth2'
+                WHEN r->>'Kind' ILIKE 'successfactors%' THEN 'successfactors'
+                WHEN r->>'Kind' ILIKE 'openconnectors%' THEN 'openconnectors' ELSE 'other' END AS kind,
+           CASE WHEN fam = 'user' THEN NULLIF(r->>'Kind', '') END AS cpi_kind,
+           NULLIF(r->>'Description', '') AS description,
+           NULLIF(COALESCE(r->>'User', r->>'ClientId'), '') AS user_name,
+           NULLIF(r->>'CompanyId', '') AS company_id,
+           NULLIF(r->>'TokenServiceUrl', '') AS token_url,
+           NULLIF(r->>'ClientAuthentication', '') AS client_auth,
+           NULLIF(r->>'Scope', '') AS scope, NULLIF(r->>'Resource', '') AS resource, NULLIF(r->>'Audience', '') AS audience,
+           COALESCE(r->'SecurityArtifactDescriptor'->>'DeployedBy', r->>'DeployedBy') AS deployed_by,
+           ${odataTs("COALESCE(r->'SecurityArtifactDescriptor'->>'DeployedOn', r->>'DeployedOn')")} AS deployed_on,
+           COALESCE(r->'SecurityArtifactDescriptor'->>'Status', r->>'Status') AS status,
+           ${cleanRecord('r')} AS raw
+    FROM src WHERE COALESCE(r->>'Name', '') <> '') x
+  ORDER BY name, prio),
+-- The same name read as user credential and as OAuth2 client credential counts once, as OAuth2 (lowest prio wins).
+up AS (
+  INSERT INTO cpi_security_material (name, kind, cpi_kind, description, user_name, company_id, token_url, client_auth, scope,
+                                     resource, audience, deployed_by, deployed_on, status, raw, first_seen_at, last_seen_at, removed_at)
+  SELECT name, kind, cpi_kind, description, user_name, company_id, token_url, client_auth, scope,
+         resource, audience, deployed_by, deployed_on, status, raw, now(), now(), NULL
+  FROM rows
+  ON CONFLICT (name) DO UPDATE SET
+    kind = EXCLUDED.kind, cpi_kind = COALESCE(EXCLUDED.cpi_kind, cpi_security_material.cpi_kind), description = EXCLUDED.description,
+    user_name = EXCLUDED.user_name, company_id = EXCLUDED.company_id, token_url = EXCLUDED.token_url,
+    client_auth = EXCLUDED.client_auth, scope = EXCLUDED.scope, resource = EXCLUDED.resource, audience = EXCLUDED.audience,
+    deployed_by = EXCLUDED.deployed_by, deployed_on = EXCLUDED.deployed_on, status = EXCLUDED.status, raw = EXCLUDED.raw,
+    last_seen_at = now(), removed_at = NULL
+  RETURNING name, kind),
+gone AS (
+  UPDATE cpi_security_material m SET removed_at = now()
+  FROM f
+  WHERE m.removed_at IS NULL AND NOT EXISTS (SELECT 1 FROM rows WHERE rows.name = m.name)
+    AND CASE m.kind WHEN 'secure_param' THEN f.secure_ok WHEN 'oauth2' THEN f.oauth_ok AND f.user_ok ELSE f.user_ok END
+  RETURNING m.name),
+log AS (
+  INSERT INTO cpi_security_material_sync (source, items, removed, counts)
+  SELECT COALESCE((SELECT j->>'source' FROM p), 'unknown'), (SELECT count(*) FROM up), (SELECT count(*) FROM gone),
+         (SELECT COALESCE(jsonb_object_agg(kind, n), '{}'::jsonb) FROM (SELECT kind, count(*) AS n FROM up GROUP BY kind) c)
+  FROM f WHERE f.user_ok OR f.oauth_ok OR f.secure_ok
+  RETURNING id, synced_at, source, items, removed, counts)
+SELECT (SELECT row_to_json(log) FROM log) AS result`;
+
+const readSecurityMaterial = `WITH p AS (SELECT $1::jsonb AS j)
+SELECT json_build_object(
+  'lastSync', (SELECT row_to_json(s) FROM (
+      SELECT synced_at, source, items, removed, counts FROM cpi_security_material_sync ORDER BY synced_at DESC, id DESC LIMIT 1) s),
+  'items', (SELECT COALESCE(json_agg(m), '[]') FROM (
+      SELECT name, kind, cpi_kind, description, user_name, company_id, token_url, client_auth, scope, resource, audience,
+             deployed_by, deployed_on, status, first_seen_at, last_seen_at, removed_at
+      FROM cpi_security_material
+      WHERE removed_at IS NULL OR (SELECT (j->>'includeRemoved')::boolean FROM p)
+      ORDER BY name) m)
+) AS result`;
+
 /* ---------- Design-time artifact locks and JMS message queues (stored in the database) ---------- */
 
 // Epoch milliseconds ("1793279156662"), OData "/Date(ms)/" or an ISO string; 0 and empty mean "none".
@@ -554,5 +640,6 @@ module.exports = {
   upsertMpls, upsertErrorInformation,
   syncKeystore, readCertificates,
   syncPgpKeys, readPgpKeys,
+  syncSecurityMaterial, readSecurityMaterial,
   syncRuntime, syncQueueMessages, readLocks, readQueues, readQueue,
 };
