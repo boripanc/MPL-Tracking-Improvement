@@ -50,13 +50,13 @@ function fail(e) { toast((e && e.message) || String(e), true); }
 function show(tab) {
   S.tab = tab;
   $$('#tabs button').forEach(function (b) { b.classList.toggle('on', b.dataset.t === tab); });
-  ['dash', 'errors', 'known', 'cats', 'tickets', 'certs', 'pgp', 'locks', 'queues'].forEach(function (t) { $('#v-' + t).hidden = t !== tab; });
+  ['dash', 'errors', 'known', 'cats', 'tickets', 'certs', 'pgp', 'secmat', 'locks', 'queues'].forEach(function (t) { $('#v-' + t).hidden = t !== tab; });
   syncRangeVisibility();
   window.scrollTo(0, 0);
   return load();
 }
 function load() {
-  var loaders = { dash: loadDash, errors: loadErrors, known: loadKnown, cats: loadCats, tickets: loadTickets, certs: loadCerts, pgp: loadPgp, locks: loadLocks, queues: loadQueues };
+  var loaders = { dash: loadDash, errors: loadErrors, known: loadKnown, cats: loadCats, tickets: loadTickets, certs: loadCerts, pgp: loadPgp, secmat: loadSecmat, locks: loadLocks, queues: loadQueues };
   if (!loaders[S.tab]) return show('dash'); // unknown menu: fall back to the dashboard instead of failing
   return loaders[S.tab]().catch(fail);
 }
@@ -73,6 +73,7 @@ function loadMeta() {
     }
     // PGP, lock and queue badges, from the database.
     if (S.tab !== 'pgp') get('api/pgp-keys').then(function (d) { if (d.enabled) setPgpBadge(d.summary); }).catch(function () {});
+    if (S.tab !== 'secmat') get('api/security-material').then(function (d) { if (d.enabled) setSecmatBadge(d.summary); }).catch(function () {});
     if (S.tab !== 'locks') get('api/locks').then(function (d) { setRuntimeBadges('locks', d); }).catch(function () {});
     if (S.tab !== 'queues') get('api/queues').then(function (d) { setRuntimeBadges('queues', d); }).catch(function () {});
     if (S.tab !== 'tickets') get('api/tickets/pulse', rangeParams()).then(setTicketBadge).catch(function () {});
@@ -82,6 +83,7 @@ function refreshAll() {
   S.cache.known = null;
   if (S.tab === 'certs') return loadCerts().catch(fail);
   if (S.tab === 'pgp') return loadPgp().catch(fail);
+  if (S.tab === 'secmat') return loadSecmat().catch(fail);
   if (S.tab === 'locks') return loadLocks().catch(fail);
   if (S.tab === 'queues') return loadQueues().catch(fail);
   return loadMeta().then(load).catch(fail);
@@ -842,6 +844,130 @@ function openPgp(k) {
     ' Keys are managed in Integration Suite under Monitor → Integrations and APIs → Manage Security → PGP Keys. The change shows here after the next sync.</p>');
 }
 
+/* ---------- Security material (CPI credentials and secure parameters, from the database) ---------- */
+var SM_STATES = { error: 'Not deployed', old: 'Due for rotation', ok: 'OK' };
+var SM_PILL = { error: 'cert-expired', old: 'cert-warning', ok: 'cert-ok' };
+var SM_KINDS = { user: 'User credentials', oauth2: 'OAuth2 client credentials', secure_param: 'Secure parameter', successfactors: 'SuccessFactors', openconnectors: 'Open Connectors', other: 'Other' };
+S.sf = { state: '', kind: '', q: '', removed: false };
+
+function smPill(m) {
+  if (m.removedAt) return '<span class="pill">Removed</span>';
+  return '<span class="pill ' + SM_PILL[m.state] + '">' + esc(SM_STATES[m.state] || m.state) + '</span>';
+}
+function setSecmatBadge(sum) { setBadge('#sec-badge', sum ? sum.error : 0); }
+function smAgeText(m) {
+  if (m.ageDays == null) return '–';
+  if (m.ageDays >= 730) return (m.ageDays / 365).toFixed(1).replace(/\.0$/, '') + ' y';
+  return fmt(m.ageDays) + ' d';
+}
+function loadSecmat() {
+  var v = $('#v-secmat');
+  if (!$('#sm-tab', v)) {
+    v.innerHTML = '<div class="grid kpis" id="sm-kpis"></div>' +
+      '<div class="filters mt"><select id="sf-state" aria-label="Status"></select><select id="sf-kind" aria-label="Type"></select>' +
+      '<input id="sf-q" type="search" placeholder="Search name, user, client ID, description or deployed by" style="min-width:240px;flex:1">' +
+      '<label class="check"><input type="checkbox" id="sf-removed"> Show removed</label>' +
+      '<button class="btn" id="sf-csv">Export CSV</button><button class="btn" id="sf-sync" hidden>Sync from CPI now</button></div>' +
+      '<div id="sm-sync"></div>' +
+      '<div class="card"><div class="row" style="margin-bottom:8px"><b id="sm-count"></b><span class="sp"></span><span class="muted small" id="sm-fetched"></span></div><div class="scroll" id="sm-tab"></div></div>' +
+      '<p class="muted small" id="sm-note"></p>';
+    $('#sf-state').onchange = function () { S.sf.state = this.value; renderSecmat(); };
+    $('#sf-kind').onchange = function () { S.sf.kind = this.value; renderSecmat(); };
+    $('#sf-q').oninput = function () { S.sf.q = this.value.trim().toLowerCase(); renderSecmat(); };
+    $('#sf-removed').onchange = function () { S.sf.removed = this.checked; loadSecmat().catch(fail); };
+    $('#sf-csv').onclick = function () {
+      downloadCsv('cpi-security-material.csv', ['state', 'name', 'type', 'user', 'description', 'status', 'deployedOn', 'ageDays', 'deployedBy', 'tokenUrl', 'companyId', 'removedAt'],
+        (S.cache.smRows || []).map(function (m) { return Object.assign({}, m, { type: SM_KINDS[m.kind] }); }));
+    };
+    $('#sf-sync').onclick = syncSecmat;
+  }
+  $('#sm-tab').innerHTML = '<div class="empty">Loading…</div>';
+  return get('api/security-material', S.sf.removed ? { removed: 1 } : {}).then(function (d) {
+    if (!d.enabled) { v.innerHTML = '<div class="card"><h2>Security material is not available yet</h2><p class="muted">' + esc(d.reason) + '</p></div>'; return; }
+    S.cache.secmat = d;
+    setSecmatBadge(d.summary);
+    renderSecmat();
+  }, function (e) { $('#sm-tab').innerHTML = '<div class="empty bad">' + esc(e.message) + '</div>'; });
+}
+function syncSecmat() {
+  var b = $('#sf-sync');
+  b.disabled = true;
+  b.textContent = 'Syncing…';
+  request('POST', 'api/security-material/sync').then(function (r) {
+    toast('Synced ' + r.items + ' security material artifacts from CPI' + (r.removed ? ', ' + r.removed + ' removed' : ''));
+    return loadSecmat();
+  }).catch(fail).then(function () { b.disabled = false; b.textContent = 'Sync from CPI now'; });
+}
+function secmatMatches(m, f) {
+  if (f.state && (m.removedAt || m.state !== f.state)) return false;
+  if (f.kind && m.kind !== f.kind) return false;
+  if (f.q && [m.name, m.user, m.description, m.deployedBy, m.tokenUrl, m.companyId].join(' ').toLowerCase().indexOf(f.q) < 0) return false;
+  return true;
+}
+function renderSecmat() {
+  var d = S.cache.secmat, f = S.sf, sum = d.summary, k = sum.kinds;
+  var years = d.rotateDays % 365 === 0 ? (d.rotateDays / 365) + (d.rotateDays === 365 ? ' year' : ' years') : d.rotateDays + ' days';
+  $('#sm-kpis').innerHTML =
+    pickKpi('sf', 'error', 'Not deployed', fmt(sum.error), 'CPI could not deploy it', sum.error ? 'alert' : '') +
+    pickKpi('sf', 'old', 'Not changed for ' + years, fmt(sum.old), 'password or secret may be due for rotation', sum.old ? 'warn' : '') +
+    pickKpi('sf', 'ok', 'OK', fmt(sum.ok), 'deployed and changed within ' + years, 'good') +
+    kpi('User credentials', fmt(k.user + k.successfactors + k.openconnectors + k.other), [k.successfactors ? fmt(k.successfactors) + ' SuccessFactors' : '', k.openconnectors ? fmt(k.openconnectors) + ' Open Connectors' : ''].filter(Boolean).join(' · ') || 'user name and password') +
+    kpi('OAuth2 client credentials', fmt(k.oauth2), 'client ID and secret') +
+    kpi('Secure parameters', fmt(k.secure_param), 'single secret value') +
+    pickKpi('sf', '', 'All security material', fmt(sum.total), sum.removed ? fmt(sum.removed) + ' removed' : 'in CPI', '');
+  kpiPick('#sm-kpis', 'sf', f.state, renderSecmat);
+  $('#sf-state').innerHTML = opts([['', 'All statuses'], ['error', 'Not deployed'], ['old', 'Not changed for ' + years], ['ok', 'OK']], f.state);
+  $('#sf-kind').innerHTML = opts([['', 'All types']].concat(Object.keys(SM_KINDS).filter(function (x) { return k[x] || x === f.kind; }).map(function (x) { return [x, SM_KINDS[x]]; })), f.kind);
+  $('#sf-removed').checked = f.removed;
+  $('#sf-sync').hidden = !d.canSync;
+  var ls = d.lastSync, wf = 'the n8n workflow "CPI Security Material → Postgres"';
+  $('#sm-fetched').textContent = ls ? 'Last synced from CPI ' + dt(ls.at) + ' (' + (ls.source || 'unknown') + ', ' + fmt(ls.items) + ' artifacts)' : 'Never synced';
+  $('#sm-sync').innerHTML = !ls
+    ? '<div class="card mt" style="margin-bottom:12px"><b class="bad">No security material data yet.</b> <span class="muted">Run ' + esc(wf) + ' once' + (d.canSync ? ' or press "Sync from CPI now"' : '') + '.</span></div>'
+    : d.stale
+      ? '<div class="card" style="margin-bottom:12px"><b class="bad">This data may be out of date:</b> <span class="muted">the last sync was ' + esc(dt(ls.at)) + ', more than ' + d.staleHours + ' hours ago. Check that ' + esc(wf) + ' is active and succeeds.</span></div>'
+      : '';
+  $('#sm-note').textContent = 'User credentials, OAuth2 client credentials and secure parameters deployed in CPI (Monitor → Integrations and APIs → Manage Security → Security Material). ' +
+    'Passwords, client secrets and secure parameter values are never read or shown, only names, users and when they were last deployed. ' +
+    'Not changed for ' + years + ' = last deployed ' + d.rotateDays + ' or more days ago (SECMAT_ROTATE_DAYS). Keystore certificates are on the Certificates menu and PGP keys on the PGP keys menu. ' +
+    'The data comes from the database, which ' + wf + ' fills.';
+  var rows = d.items.filter(function (m) { return secmatMatches(m, f); });
+  S.cache.smRows = rows;
+  $('#sm-count').textContent = fmt(rows.length) + ' of ' + fmt(d.items.length) + ' artifacts' + (sum.removed ? ' (' + fmt(sum.removed) + ' removed)' : '');
+  if (!rows.length) { $('#sm-tab').innerHTML = '<div class="empty">' + (d.items.length ? 'No security material matches these filters.' : 'There is no security material in CPI.') + '</div>'; return; }
+  $('#sm-tab').innerHTML = '<table><thead><tr><th>Status</th><th>Name</th><th>Type</th><th>User / client ID</th><th>Last deployed</th><th class="num">Age</th><th>Deployed by</th></tr></thead><tbody>' +
+    rows.map(function (m, i) {
+      return '<tr class="click" data-i="' + i + '"><td>' + smPill(m) + '</td><td><b>' + esc(m.name) + '</b>' + (m.description ? '<div class="muted small">' + esc(short(m.description, 80)) + '</div>' : '') + '</td>' +
+        '<td class="small">' + esc(SM_KINDS[m.kind]) + '</td><td class="small mono">' + esc(short(m.user, 48)) + '</td>' +
+        '<td class="nowrap">' + dateOnly(m.deployedOn) + '</td><td class="num nowrap' + (m.state === 'old' ? ' warn' : '') + '">' + smAgeText(m) + '</td>' +
+        '<td class="small">' + esc(m.deployedBy) + '</td></tr>';
+    }).join('') + '</tbody></table>';
+  $$('#sm-tab tr[data-i]').forEach(function (t) { t.onclick = function () { openSecmat(rows[+t.dataset.i]); }; });
+}
+function openSecmat(m) {
+  var secret = m.kind === 'oauth2' ? 'client secret' : m.kind === 'secure_param' ? 'secure parameter value' : 'password';
+  openDrawer(drawerHead('Security material: ' + m.name) +
+    '<div class="row" style="margin-bottom:12px">' + smPill(m) + '<span class="muted">' + (m.ageDays != null ? 'last deployed ' + esc(smAgeText(m)) + ' ago' : '') + '</span></div>' +
+    '<div class="kv">' +
+      kv('Name', '<b>' + esc(m.name) + '</b>') +
+      kv('Type', esc(SM_KINDS[m.kind]) + (m.cpiKind && m.cpiKind !== 'default' ? ' <span class="muted small">(' + esc(m.cpiKind) + ')</span>' : '')) +
+      kv('Description', esc(m.description)) +
+      kv(m.kind === 'oauth2' ? 'Client ID' : 'User', m.user ? '<span class="mono">' + esc(m.user) + '</span>' : '') +
+      kv('Company ID', esc(m.companyId)) +
+      kv('Token service URL', m.tokenUrl ? '<span class="mono small">' + esc(m.tokenUrl) + '</span>' : '') +
+      kv('Client authentication', esc(m.clientAuthentication === 'header' ? 'Send as basic authentication header' : m.clientAuthentication === 'body' ? 'Send as request body parameters' : m.clientAuthentication)) +
+      kv('Scope', esc(m.scope)) + kv('Resource', esc(m.resource)) + kv('Audience', esc(m.audience)) +
+      kv('CPI status', m.status === 'DEPLOYED' ? pill('Deployed', 'Resolved') : m.status ? pill(m.status, 'Open') : '') +
+      kv('Last deployed', '<b>' + esc(dtFull(m.deployedOn)) + '</b>') + kv('Deployed by', esc(m.deployedBy)) +
+      kv('First seen', esc(dtFull(m.firstSeenAt))) + kv('Last seen in CPI', esc(dtFull(m.lastSeenAt))) +
+      (m.removedAt ? kv('Removed from CPI', '<b>' + esc(dtFull(m.removedAt)) + '</b>') : '') +
+    '</div>' +
+    '<p class="muted small" style="margin-top:20px">The ' + secret + ' is never read or shown here. ' +
+    (m.state === 'old' ? 'It has not been changed for ' + esc(smAgeText(m)) + ': check with the owner of the target system whether it should be rotated. ' : '') +
+    (m.state === 'error' ? 'CPI reports it as ' + esc(m.status) + ': open it in CPI and deploy it again. ' : '') +
+    'Security material is managed in Integration Suite under Monitor → Integrations and APIs → Manage Security → Security Material. A change shows here after the next sync.</p>');
+}
+
 /* ---------- Locks and Message queues (CPI runtime, from the database) ---------- */
 var LOCK_STATES = { locked: 'Locked', old: 'Locked a long time', released: 'Unlocked' };
 var Q_STATES = { full: 'Full', critical: 'Nearly full', failed: 'Failed messages', inactive: 'Inactive', waiting: 'Messages waiting', ok: 'OK', removed: 'Removed' };
@@ -1118,8 +1244,8 @@ function tkMonths() {
 function tkPicked() { return S.tp === 'month' && S.tkMonth ? S.tkMonth : ''; }
 function tkSpan() { return tkPicked() ? 'in ' + monthName(tkPicked()) : TP[S.tp].span; }
 function syncRangeVisibility() {
-  // Certificates, PGP keys, locks and queues do not depend on the period; Ticket pulse only uses it in the daily view.
-  $('#range').hidden = ['certs', 'pgp', 'locks', 'queues'].indexOf(S.tab) >= 0 || (S.tab === 'tickets' && S.tp !== 'day');
+  // Certificates, PGP keys, security material, locks and queues do not depend on the period; Ticket pulse only uses it in the daily view.
+  $('#range').hidden = ['certs', 'pgp', 'secmat', 'locks', 'queues'].indexOf(S.tab) >= 0 || (S.tab === 'tickets' && S.tp !== 'day');
 }
 function setTicketView(tp) {
   S.tp = tp;

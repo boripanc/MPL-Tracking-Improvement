@@ -241,3 +241,40 @@ CREATE TABLE IF NOT EXISTS cpi_pgp_sync (
   removed   integer NOT NULL,
   keyrings  jsonb                           -- [{ name, type, lastModifiedBy, lastModifiedTime, status, errors }]
 );
+
+-- ---------------------------------------------------------------------------------------------
+-- CPI security material (Security material menu): user credentials, OAuth2 client credentials and
+-- secure parameters (Monitor > Manage Security > Security Material, OData "UserCredentials",
+-- "OAuth2ClientCredentials", "SecureParameters"). Filled by the n8n workflow
+-- "CPI Security Material → Postgres" or by this app's own sync; the web page only reads these tables.
+-- Passwords, client secrets and secure parameter values are never stored, only the descriptive fields.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS cpi_security_material (
+  name           text PRIMARY KEY,         -- artifact name (unique in the tenant)
+  kind           text NOT NULL,            -- user, oauth2, secure_param, successfactors, openconnectors, other
+  cpi_kind       text,                     -- CPI's own Kind (default, oauth2:default, successfactors, ...)
+  description    text,
+  user_name      text,                     -- user (user credentials) or client ID (OAuth2)
+  company_id     text,                     -- SuccessFactors company ID
+  token_url      text,                     -- OAuth2 token service URL
+  client_auth    text,                     -- OAuth2 client authentication: header / body
+  scope          text,
+  resource       text,
+  audience       text,
+  deployed_by    text,
+  deployed_on    timestamptz,              -- last deployed (created or changed) in CPI
+  status         text,                     -- DEPLOYED, ...
+  raw            jsonb,                    -- CPI record without secrets
+  first_seen_at  timestamptz NOT NULL DEFAULT now(),
+  last_seen_at   timestamptz NOT NULL DEFAULT now(),
+  removed_at     timestamptz               -- set when the artifact is no longer in CPI
+);
+
+CREATE TABLE IF NOT EXISTS cpi_security_material_sync (
+  id        serial PRIMARY KEY,
+  synced_at timestamptz NOT NULL DEFAULT now(),
+  source    text,                          -- n8n or app
+  items     integer NOT NULL,
+  removed   integer NOT NULL,
+  counts    jsonb                          -- { user, oauth2, secure_param, ... } as read this time
+);

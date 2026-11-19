@@ -137,6 +137,11 @@ function loadConfig(env = process.env) {
       // The page warns when the last sync (by n8n or the app) is older than this.
       staleHours: Math.max(1, int(env.CERT_STALE_HOURS, 26)),
     },
+    securityMaterial: {
+      // Security material menu: a credential or secure parameter not changed for this many days is flagged
+      // (its password or secret is probably due for rotation). Sync interval and stale warning follow CERT_*.
+      rotateDays: Math.max(1, int(env.SECMAT_ROTATE_DAYS, 365)),
+    },
     runtime: {
       // Locks and Message queues menus. Only used when this server has a CPI connection: how often the app copies
       // locks and queues into the database (the n8n workflow does this otherwise).
