@@ -420,12 +420,14 @@ tickets to the WorkStream board `KANBAN_TICKET_BOARD` ("Ticket pulse") every `KA
 first run creates the board with the columns Open, In Progress, Pending and Resolved / Closed. Each ticket is one
 card titled `<ticket id> · <subject>`, in the column of its status (other open statuses, such as waiting on the
 customer, go to Pending), with the Freshservice status, responder, group, link and due date in the notes; an overdue
-ticket gets priority high; the ticket type is the label. Cards stay unassigned (the responder is in the notes).
+ticket gets priority high; the ticket type is the label. Each card is assigned to the ticket's agent (the Freshservice responder; unassigned tickets stay unassigned).
+WorkStream asks the board owner to approve each assignment, and a request still waiting is not sent again; an agent
+the board team does not have yet joins the team once approved.
 The same tickets as on Ticket pulse are copied: noncharge tickets and Standard / Normal / Emergency changes are left
 out. Open tickets stay until they close; closed ones leave after `KANBAN_TICKET_DONE_DAYS`.
 
 The sync is one way: nothing goes back to Freshservice, and each run puts every ticket card back the way Freshservice
-has it, so a card dragged or edited on the board is reset within one interval. Cards whose title does not start with a
+has it, so a card dragged, edited or reassigned on the board is reset within one interval. Cards whose title does not start with a
 ticket id (added by hand) are left alone. WorkStream itself cannot lock a board: share it with others as viewers so
 only the owner can touch it. Ticket pulse shows when the board was last synced and has a **Sync now** button
 (`POST /api/kanban/ticket-board/sync`).

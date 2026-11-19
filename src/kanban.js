@@ -326,6 +326,7 @@ function createKanban(cfg, { pool, env = process.env } = {}) {
         if (c.priority && c.priority !== 'none') args.priority = c.priority;
         if (c.dueDate) args.dueDate = c.dueDate;
         if (c.labels && c.labels.length) args.labels = c.labels;
+        if (c.assignees && c.assignees.length) args.assignees = c.assignees;
         await attempt('created', () => call('create_card', args));
       }
       return r;

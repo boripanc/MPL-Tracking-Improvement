@@ -6,7 +6,9 @@
  *
  * The board is for tracking only. Every run puts each ticket card back the way Freshservice has it, so a card
  * that was dragged or edited on the board is reset on the next run. Nothing goes back to Freshservice.
- * Cards that do not start with a ticket id (added by hand) are left alone.
+ * Cards that do not start with a ticket id (added by hand) are left alone. Each card is assigned to the ticket's
+ * agent (Freshservice responder); WorkStream asks the board owner to approve each assignment, and a request that is
+ * still waiting is not sent again.
  */
 
 const COLUMNS = ['Open', 'In Progress', 'Pending', 'Resolved / Closed'];
@@ -49,6 +51,7 @@ function cardFor(t, { tz = 'Asia/Bangkok', now = Date.now() } = {}) {
     priority: overdue ? 'high' : 'none',
     dueDate: t.closed ? null : day(t.due_by, tz),
     labels: t.type ? [t.type] : [],
+    assignees: t.responder ? [t.responder] : [],
   };
 }
 
@@ -58,6 +61,24 @@ function ticketIdOf(card) {
 }
 
 const labelNames = (labels) => (labels || []).map((l) => (typeof l === 'string' ? l : l.name)).sort();
+const names = (list) => (list || []).map((x) => (typeof x === 'string' ? x : x && x.name)).filter(Boolean).map((x) => x.toLowerCase()).sort();
+
+/** Names in an assignment request that waits for the owner's approval; [] = a request we cannot read; null = none. */
+function pendingNames(card) {
+  const pa = card.pendingAssignment;
+  if (!pa) return null;
+  return names(Array.isArray(pa) ? pa : pa.assignees || pa.names || pa.requested || []);
+}
+
+/** True when the card should get a new assignment request. */
+function needsAssignment(have, want) {
+  const target = JSON.stringify(names(want));
+  if (JSON.stringify(names(have.assignees)) === target) return false;
+  const pending = pendingNames(have);
+  // A request is already waiting for this (or, when we cannot read it, some) assignment: do not ask again.
+  if (pending && (!pending.length || JSON.stringify(pending) === target)) return false;
+  return true;
+}
 
 /** The fields of `want` that differ on the card `have` (empty object = nothing to change). */
 function changes(have, want) {
@@ -68,6 +89,7 @@ function changes(have, want) {
   if ((have.priority || 'none') !== want.priority) out.priority = want.priority;
   if ((have.dueDate || null) !== want.dueDate) out.dueDate = want.dueDate;
   if (JSON.stringify(labelNames(have.labels)) !== JSON.stringify(labelNames(want.labels))) out.labels = want.labels;
+  if (want.assignees && needsAssignment(have, want.assignees)) out.assignees = want.assignees;
   return out;
 }
 
