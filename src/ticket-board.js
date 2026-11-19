@@ -29,7 +29,7 @@ function day(ts, tz) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(ts));
 }
 
-/** The card a ticket should be: { title, column, description, priority, dueDate, labels }. */
+/** The card a ticket should be: { title, column, description, priority, startDate, dueDate, labels, assignees }. */
 function cardFor(t, { tz = 'Asia/Bangkok', now = Date.now() } = {}) {
   const overdue = !t.closed && t.due_by && new Date(t.due_by).getTime() < now;
   const lines = [
@@ -49,6 +49,7 @@ function cardFor(t, { tz = 'Asia/Bangkok', now = Date.now() } = {}) {
     column: columnFor(t),
     description: lines.join('\n'),
     priority: overdue ? 'high' : 'none',
+    startDate: day(t.created_at, tz),
     dueDate: t.closed ? null : day(t.due_by, tz),
     labels: t.type ? [t.type] : [],
     assignees: t.responder ? [t.responder] : [],
@@ -87,6 +88,7 @@ function changes(have, want) {
   if (have.title !== want.title) out.title = want.title;
   if ((have.description || '') !== want.description) out.description = want.description;
   if ((have.priority || 'none') !== want.priority) out.priority = want.priority;
+  if ((have.startDate || null) !== want.startDate) out.startDate = want.startDate;
   if ((have.dueDate || null) !== want.dueDate) out.dueDate = want.dueDate;
   if (JSON.stringify(labelNames(have.labels)) !== JSON.stringify(labelNames(want.labels))) out.labels = want.labels;
   if (want.assignees && needsAssignment(have, want.assignees)) out.assignees = want.assignees;
